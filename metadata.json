@@ -1,0 +1,6 @@
+{
+  "name": "Kalpa",
+  "description": "Imagine it. Kalpa builds it. A mobile-first, bring-your-own-key AI app builder and browser IDE.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

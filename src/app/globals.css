@@ -1,0 +1,223 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@xterm/xterm/css/xterm.css";
+
+:root {
+  --bg: #08080F;
+  --bg-2: #0E0E18;
+  --surface: rgba(255, 255, 255, 0.05);
+  --surface-2: rgba(255, 255, 255, 0.08);
+  --border: rgba(255, 255, 255, 0.10);
+  --text: #F4F4FA;
+  --muted: #9A9BB4;
+
+  --gold: #FFB86B;
+  --rose: #FF5F9E;
+  --violet: #7C5CFF;
+  --grad: linear-gradient(135deg, #FFB86B 0%, #FF5F9E 48%, #7C5CFF 100%);
+  --success: #3DDC97;
+  --warn: #FFC857;
+  --danger: #FF5C6C;
+
+  --shadow-soft: 0 8px 32px rgba(0, 0, 0, 0.32);
+  --shadow-glow: 0 0 40px rgba(124, 92, 255, 0.25);
+
+  --vvh: 100dvh;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #F7F7FB;
+  --bg-2: #FFFFFF;
+  --surface: rgba(20, 20, 40, 0.04);
+  --surface-2: rgba(20, 20, 40, 0.08);
+  --border: rgba(20, 20, 40, 0.12);
+  --text: #14142B;
+  --muted: #5B5C75;
+
+  --shadow-soft: 0 8px 28px rgba(20, 20, 40, 0.08);
+  --shadow-glow: 0 0 36px rgba(124, 92, 255, 0.18);
+  color-scheme: light;
+}
+
+@theme {
+  --color-kalpa-bg: var(--bg);
+  --color-kalpa-bg-2: var(--bg-2);
+  --color-kalpa-surface: var(--surface);
+  --color-kalpa-surface-2: var(--surface-2);
+  --color-kalpa-border: var(--border);
+  --color-kalpa-text: var(--text);
+  --color-kalpa-muted: var(--muted);
+  --color-kalpa-gold: var(--gold);
+  --color-kalpa-rose: var(--rose);
+  --color-kalpa-violet: var(--violet);
+  --color-kalpa-success: var(--success);
+  --color-kalpa-warn: var(--warn);
+  --color-kalpa-danger: var(--danger);
+
+  --radius-kalpa-sm: 10px;
+  --radius-kalpa-md: 16px;
+  --radius-kalpa-lg: 24px;
+
+  --shadow-kalpa-soft: var(--shadow-soft);
+  --shadow-kalpa-glow: var(--shadow-glow);
+
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 2px;
+}
+
+/* Kalpa Glass Utility */
+.kalpa-glass {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.kalpa-grad-bg {
+  background-image: var(--grad);
+}
+
+.kalpa-grad-text {
+  background-image: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Safe-area inset utilities */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.pl-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+}
+.pr-safe {
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Subtle animated conic border for PromptBox */
+@keyframes kalpa-spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.kalpa-conic-wrap {
+  position: relative;
+  border-radius: 24px;
+  padding: 1px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.kalpa-conic-wrap::before {
+  content: "";
+  position: absolute;
+  inset: -60%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0%,
+    rgba(255, 184, 107, 0.55) 18%,
+    rgba(255, 95, 158, 0.65) 34%,
+    rgba(124, 92, 255, 0.7) 50%,
+    transparent 68%,
+    transparent 100%
+  );
+  animation: kalpa-spin-slow 14s linear infinite;
+  pointer-events: none;
+}
+
+/* Aurora drifting blobs (GPU compositor transform only) */
+@keyframes kalpa-aurora-1 {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(40px, -28px, 0) scale(1.08); }
+}
+@keyframes kalpa-aurora-2 {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(-44px, 32px, 0) scale(1.06); }
+}
+@keyframes kalpa-aurora-3 {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(24px, 36px, 0) scale(0.95); }
+}
+
+.kalpa-blob-1 { animation: kalpa-aurora-1 22s ease-in-out infinite; }
+.kalpa-blob-2 { animation: kalpa-aurora-2 26s ease-in-out infinite; }
+.kalpa-blob-3 { animation: kalpa-aurora-3 30s ease-in-out infinite; }
+
+[data-tab-hidden="true"] .kalpa-blob-1,
+[data-tab-hidden="true"] .kalpa-blob-2,
+[data-tab-hidden="true"] .kalpa-blob-3,
+[data-tab-hidden="true"] .kalpa-conic-wrap::before,
+[data-reduce-motion="true"] .kalpa-blob-1,
+[data-reduce-motion="true"] .kalpa-blob-2,
+[data-reduce-motion="true"] .kalpa-blob-3,
+[data-reduce-motion="true"] .kalpa-conic-wrap::before {
+  animation-play-state: paused !important;
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kalpa-blob-1,
+  .kalpa-blob-2,
+  .kalpa-blob-3,
+  .kalpa-conic-wrap::before {
+    animation: none !important;
+  }
+}
+
+/* Shimmer skeleton */
+@keyframes kalpa-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.kalpa-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--surface-2), transparent);
+  animation: kalpa-shimmer 1.6s infinite;
+}
+
+/* Highlight.js token palette harmonized with Kalpa Dawn */
+.hljs { color: var(--text); background: transparent; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in { color: #FF7AB2; }
+.hljs-string, .hljs-attr, .hljs-addition { color: #3DDC97; }
+.hljs-number, .hljs-literal, .hljs-symbol, .hljs-Variable { color: #FFB86B; }
+.hljs-title, .hljs-section, .hljs-function .hljs-title { color: #A690FF; }
+.hljs-comment, .hljs-quote, .hljs-meta { color: var(--muted); font-style: italic; }
+.hljs-type, .hljs-class .hljs-title { color: #FFC857; }
+[data-theme="light"] .hljs-keyword, [data-theme="light"] .hljs-selector-tag { color: #C9266B; }
+[data-theme="light"] .hljs-string, [data-theme="light"] .hljs-attr { color: #0F8A54; }
+[data-theme="light"] .hljs-number, [data-theme="light"] .hljs-literal { color: #B85C00; }
+[data-theme="light"] .hljs-title, [data-theme="light"] .hljs-section { color: #5636D6; }
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }

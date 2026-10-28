@@ -56,9 +56,11 @@ export function RecentProjects() {
   const duplicateProject = useProjectStore((s) => s.duplicateProject);
   const deleteProject = useProjectStore((s) => s.deleteProject);
   const importProjectFromZip = useProjectStore((s) => s.importProjectFromZip);
+  const importProjectFromFolder = useProjectStore((s) => s.importProjectFromFolder);
   const addToast = useUiStore((s) => s.addToast);
 
   const zipInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [renamingProj, setRenamingProj] = useState<ProjectRecord | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
@@ -87,6 +89,24 @@ export function RecentProjects() {
     }
   };
 
+  const handleImportFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    try {
+      const p = await importProjectFromFolder(files);
+      addToast({ title: `Imported folder "${p.name}"`, kind: 'success' });
+      router.push(`/ide?p=${encodeURIComponent(p.id)}`);
+    } catch (err) {
+      addToast({
+        title: 'Folder import failed',
+        description: err instanceof Error ? err.message : String(err),
+        kind: 'error',
+      });
+    } finally {
+      e.target.value = '';
+    }
+  };
+
   const submitRename = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!renamingProj || !renameDraft.trim()) return;
@@ -104,9 +124,17 @@ export function RecentProjects() {
 
   return (
     <section className="space-y-4 w-full">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-base font-semibold tracking-tight text-kalpa-text">Your projects</h2>
-        <div>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            leftIcon={<FolderOpen className="w-3.5 h-3.5" />}
+            onClick={() => folderInputRef.current?.click()}
+          >
+            Import Folder
+          </Button>
           <Button
             size="sm"
             variant="secondary"
@@ -120,6 +148,14 @@ export function RecentProjects() {
             type="file"
             accept=".zip,application/zip"
             onChange={handleImportZip}
+            className="hidden"
+          />
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+            onChange={handleImportFolder}
             className="hidden"
           />
         </div>

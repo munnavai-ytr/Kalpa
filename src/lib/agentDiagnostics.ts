@@ -14,9 +14,14 @@ import { runE2bSelfTest } from '@/lib/sandbox/e2b';
 import { getKalpaDB } from '@/lib/vfs/db';
 import { vfs } from '@/lib/vfs/vfs';
 import type { DiagItem } from './diagnosticsRunner';
+import {
+  executeReliabilityDiagnostics,
+  INITIAL_RELIABILITY_DIAGNOSTIC_CHECKS,
+} from './reliabilityDiagnostics';
 
 export const INITIAL_AGENT_DIAGNOSTIC_CHECKS: DiagItem[] = [
   { id: 'agent-protocol', label: 'Agent ActionStream & Tolerant Edits', state: 'RUNNING', detail: 'Streaming XML chunks…' },
+  ...INITIAL_RELIABILITY_DIAGNOSTIC_CHECKS,
   { id: 'checkpoints', label: 'Checkpoint SHA-1 Snapshot Round-Trip', state: 'RUNNING', detail: 'Testing tree restore…' },
   { id: 'brain-index', label: 'Brain Index & Import Graph Builder', state: 'RUNNING', detail: 'Scanning exports & rdeps…' },
   { id: 'token-estimator', label: 'Token Budget & Context Estimator', state: 'RUNNING', detail: 'Computing allocation…' },
@@ -102,6 +107,9 @@ export async function executeAgentDiagnosticsSuite(
       detail: err instanceof Error ? err.message : String(err),
     });
   }
+
+  // 1b. Reliability Self-Tests (Error Classifier, Lenient/Markdown Parser, Nested ZIP + Sandpack Rewrite)
+  await executeReliabilityDiagnostics(upsertCheck);
 
   // 2. Checkpoint Round-Trip
   const tCp = performance.now();

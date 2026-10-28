@@ -11,9 +11,10 @@ import { Button } from '@/components/ui/Button';
 
 export interface ScriptRunnerViewProps {
   projectId: string;
-  projectType: 'python' | 'js';
+  projectType: 'python' | 'node-script' | 'js';
   snapshot: Record<string, string>;
   activeFilePath: string | null;
+  entryFile?: string;
 }
 
 export function ScriptRunnerView({
@@ -21,13 +22,17 @@ export function ScriptRunnerView({
   projectType,
   snapshot,
   activeFilePath,
+  entryFile,
 }: ScriptRunnerViewProps) {
   const setStatus = usePreviewStore((s) => s.setStatus);
   const writeTerminalLine = useTerminalStore((s) => s.writeLine);
 
   const scriptFiles = useMemo(() => {
-    const ext = projectType === 'python' ? '.py' : '.js';
-    return Object.keys(snapshot).filter((p) => p.endsWith(ext));
+    const keys = Object.keys(snapshot).filter((p) => !p.startsWith('.kalpa/'));
+    if (projectType === 'python') {
+      return keys.filter((p) => p.endsWith('.py'));
+    }
+    return keys.filter((p) => /\.(js|mjs|cjs|ts)$/.test(p));
   }, [projectType, snapshot]);
 
   const [runningScript, setRunningScript] = useState(false);
@@ -36,6 +41,7 @@ export function ScriptRunnerView({
 
   const selectedScript =
     (activeFilePath && scriptFiles.includes(activeFilePath) ? activeFilePath : null) ??
+    (entryFile && scriptFiles.includes(entryFile) ? entryFile : null) ??
     (scriptFiles.includes('main.py') ? 'main.py' : scriptFiles[0] ?? '');
 
   const handleRunScript = async () => {

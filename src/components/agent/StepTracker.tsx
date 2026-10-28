@@ -25,6 +25,7 @@ export function StepTracker() {
   const step = useAgentStore((s) => s.step);
   const statusLabel = useAgentStore((s) => s.statusLabel);
   const iteration = useAgentStore((s) => s.iteration);
+  const activeNotice = useAgentStore((s) => s.activeNotice);
   const stopTurn = useAgentStore((s) => s.stopTurn);
 
   const tasksMd = useBrainStore((s) => s.memory.tasks);
@@ -80,6 +81,21 @@ export function StepTracker() {
           Stop
         </button>
       </div>
+
+      {activeNotice ? (
+        <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-[8px] bg-kalpa-warn/15 border border-kalpa-warn/35 text-[11px] font-mono text-kalpa-text">
+          <span className="truncate">{activeNotice.text}</span>
+          {activeNotice.kind === 'retry_countdown' ? (
+            <button
+              type="button"
+              onClick={stopTurn}
+              className="text-kalpa-danger font-semibold hover:underline cursor-pointer shrink-0"
+            >
+              Cancel
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {breakpoint !== 'phone' ? (
         <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">

@@ -1,4 +1,7 @@
 import JSZip from 'jszip';
+import { detectProjectType, stripCommonRoot } from '@/lib/agent/reliability';
+import { ensureBrainFiles } from '@/lib/brain/files';
+import { rebuildBrainIndex } from '@/lib/brain/index';
 import { getKalpaDB, type ProjectRecord } from './db';
 import { isBinaryPath, normalisePath } from './paths';
 import { vfs, type VfsWriteEntry } from './vfs';
@@ -12,6 +15,15 @@ function triggerDownload(blob: Blob, filename: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 export async function downloadProjectZip(
@@ -64,35 +76,18 @@ export async function downloadAllProjectsZip(): Promise<number> {
 
 export async function extractZipEntries(file: File): Promise<VfsWriteEntry[]> {
   const zip = await JSZip.loadAsync(file);
-  const rawPaths = Object.keys(zip.files).filter((k) => !zip.files[k].dir);
-
-  // Strip common single top-level directory if all files share one
-  let commonRoot = '';
-  if (rawPaths.length > 0 && rawPaths.every((p) => p.includes('/'))) {
-    const firstSeg = rawPaths[0].split('/')[0];
-    if (firstSeg && rawPaths.every((p) => p.startsWith(`${firstSeg}/`))) {
-      commonRoot = `${firstSeg}/`;
-    }
+  const rawObjects: Record<string, JSZip.JSZipObject> = {};
+  for (const [key, obj] of Object.entries(zip.files)) {
+    if (!obj.dir) rawObjects[key] = obj;
   }
 
+  const stripped = stripCommonRoot(rawObjects);
   const entries: VfsWriteEntry[] = [];
-  for (const rawKey of rawPaths) {
-    const zipObj = zip.files[rawKey];
-    if (zipObj.dir) continue;
-    const stripped = commonRoot && rawKey.startsWith(commonRoot) ? rawKey.slice(commonRoot.length) : rawKey;
-    if (
-      !stripped ||
-      stripped.startsWith('__MACOSX') ||
-      stripped.includes('/.DS_Store') ||
-      stripped === '.DS_Store' ||
-      stripped.startsWith('node_modules/') ||
-      stripped.startsWith('.git/')
-    ) {
-      continue;
-    }
+
+  for (const [cleanKey, zipObj] of Object.entries(stripped)) {
     let path: string;
     try {
-      path = normalisePath(stripped);
+      path = normalisePath(cleanKey);
     } catch {
       continue;
     }
@@ -108,22 +103,83 @@ export async function extractZipEntries(file: File): Promise<VfsWriteEntry[]> {
   return entries;
 }
 
-export async function importZipIntoExistingProject(projectId: string, file: File): Promise<number> {
+export async function extractFolderEntries(files: FileList | File[]): Promise<VfsWriteEntry[]> {
+  const list = Array.from(files);
+  const rawMap: Record<string, File> = {};
+  for (const f of list) {
+    const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
+    if (rel) rawMap[rel] = f;
+  }
+
+  const stripped = stripCommonRoot(rawMap);
+  const entries: VfsWriteEntry[] = [];
+
+  for (const [cleanKey, fileObj] of Object.entries(stripped)) {
+    let path: string;
+    try {
+      path = normalisePath(cleanKey);
+    } catch {
+      continue;
+    }
+    if (!path) continue;
+    if (isBinaryPath(path)) {
+      const buf = await fileObj.arrayBuffer();
+      entries.push({ path, content: uint8ToBase64(new Uint8Array(buf)), encoding: 'base64' });
+    } else {
+      const text = await fileObj.text();
+      entries.push({ path, content: text, encoding: 'utf8' });
+    }
+  }
+  return entries;
+}
+
+export async function importZipIntoExistingProject(
+  projectId: string,
+  file: File
+): Promise<{ count: number; entry?: string }> {
   const entries = await extractZipEntries(file);
   if (entries.length > 0) {
     await vfs.writeMany(projectId, entries);
   }
-  return entries.length;
+  await ensureBrainFiles(projectId);
+  await rebuildBrainIndex(projectId);
+  const snap = await vfs.snapshot(projectId);
+  const det = detectProjectType(snap);
+  return { count: entries.length, entry: det.entry };
+}
+
+export async function importFolderIntoExistingProject(
+  projectId: string,
+  files: FileList | File[]
+): Promise<{ count: number; entry?: string }> {
+  const entries = await extractFolderEntries(files);
+  if (entries.length > 0) {
+    await vfs.writeMany(projectId, entries);
+  }
+  await ensureBrainFiles(projectId);
+  await rebuildBrainIndex(projectId);
+  const snap = await vfs.snapshot(projectId);
+  const det = detectProjectType(snap);
+  return { count: entries.length, entry: det.entry };
 }
 
 export function inferStackFromPaths(paths: string[]): ProjectRecord['stack'] {
-  if (paths.some((p) => p.startsWith('app/') || p.startsWith('src/app/') || p.startsWith('pages/'))) {
+  if (
+    paths.some(
+      (p) =>
+        p.startsWith('app/') ||
+        p.startsWith('src/app/') ||
+        p.startsWith('pages/') ||
+        p.startsWith('src/pages/') ||
+        /^next\.config\./.test(p)
+    )
+  ) {
     return 'next';
   }
   if (paths.some((p) => p.endsWith('.tsx') || p.endsWith('.jsx'))) {
     return 'react';
   }
-  if (paths.includes('index.html')) {
+  if (paths.includes('index.html') || paths.includes('public/index.html')) {
     return 'html';
   }
   if (paths.some((p) => p.endsWith('.py'))) {

@@ -1,6 +1,8 @@
 import { resolveRelativePath } from '@/lib/vfs/paths';
 
-const CONSOLE_SHIM = `<script>
+function buildStaticShim(expectedHash: string): string {
+  const safeHash = JSON.stringify(expectedHash);
+  return `<script>
 (function(){
   function send(level, args, file, line) {
     try {
@@ -25,11 +27,30 @@ const CONSOLE_SHIM = `<script>
   window.addEventListener('unhandledrejection', function(e){
     send('error', ['Unhandled rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)]);
   });
+  function notifyReady(){
+    try { parent.postMessage({ kalpa: 'preview-ready', filesHash: ${safeHash} }, '*'); } catch (_) {}
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', notifyReady, { once: true });
+  } else {
+    setTimeout(notifyReady, 0);
+  }
 })();
 </script>`;
+}
 
-export function buildStaticHtmlDocument(files: Record<string, string>): string {
-  const entryPath = files['index.html'] !== undefined ? 'index.html' : 'public/index.html';
+export function buildStaticHtmlDocument(
+  files: Record<string, string>,
+  expectedHash = '',
+  entryHint?: string
+): string {
+  const entryPath =
+    (entryHint && files[entryHint] !== undefined && entryHint.endsWith('.html') ? entryHint : null) ??
+    (files['index.html'] !== undefined ? 'index.html' : null) ??
+    (files['public/index.html'] !== undefined ? 'public/index.html' : null) ??
+    Object.keys(files).find((p) => p.endsWith('.html') && !p.startsWith('.kalpa/')) ??
+    'index.html';
+
   const entryDir = entryPath.includes('/') ? entryPath.split('/').slice(0, -1).join('/') : '';
   let html = files[entryPath] ?? '<!DOCTYPE html><html><body></body></html>';
 
@@ -57,10 +78,11 @@ export function buildStaticHtmlDocument(files: Record<string, string>): string {
     }
   );
 
+  const shim = buildStaticShim(expectedHash);
   if (/<head\b[^>]*>/i.test(html)) {
-    html = html.replace(/<head\b[^>]*>/i, (m) => `${m}\n${CONSOLE_SHIM}`);
+    html = html.replace(/<head\b[^>]*>/i, (m) => `${m}\n${shim}`);
   } else {
-    html = `${CONSOLE_SHIM}\n${html}`;
+    html = `${shim}\n${html}`;
   }
 
   return html;

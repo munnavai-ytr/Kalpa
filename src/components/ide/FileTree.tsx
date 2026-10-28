@@ -2,16 +2,7 @@
 
 import React, { useMemo, useRef, useState } from 'react';
 import {
-  Brain,
-  ChevronDown,
-  ChevronRight,
-  FileCode,
-  FileImage,
-  FileJson,
   FilePlus,
-  FileText,
-  Folder,
-  FolderOpen,
   FolderPlus,
   Lock,
   MoreHorizontal,
@@ -20,13 +11,18 @@ import {
 } from 'lucide-react';
 import { isBrainPath } from '@/lib/brain/caps';
 import { vfs } from '@/lib/vfs/vfs';
-import { isBinaryPath, isImagePath, normalisePath } from '@/lib/vfs/paths';
+import { isBinaryPath, normalisePath } from '@/lib/vfs/paths';
 import { buildFileTreeRows, type TreeRow } from '@/lib/vfs/fileTreeRows';
-import { importZipIntoExistingProject } from '@/lib/vfs/zip';
+import {
+  importFolderIntoExistingProject,
+  importZipIntoExistingProject,
+} from '@/lib/vfs/zip';
+import { usePreviewStore } from '@/stores/preview';
 import { useProjectStore } from '@/stores/project';
 import { useUiStore } from '@/stores/ui';
 import { IconButton } from '@/components/ui/IconButton';
 import { FileTreeDialogs, type FileTreeDialogMode } from './FileTreeDialogs';
+import { FileTreeRowIcon } from './FileTreeRowIcon';
 
 export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
   const currentProject = useProjectStore((s) => s.currentProject);
@@ -34,11 +30,13 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
   const activeFilePath = useProjectStore((s) => s.activeFilePath);
   const dirtyBuffers = useProjectStore((s) => s.dirtyBuffers);
   const openFile = useProjectStore((s) => s.openFile);
+  const reloadPreview = usePreviewStore((s) => s.reloadPreview);
   const setActiveIdeTab = useUiStore((s) => s.setActiveIdeTab);
   const addToast = useUiStore((s) => s.addToast);
 
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const zipInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const [query, setQuery] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['.kalpa']));
@@ -78,6 +76,7 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
           await vfs.write(currentProject.id, path, text, 'utf8');
         }
       }
+      reloadPreview();
       addToast({ title: `Uploaded ${list.length} file(s)`, kind: 'success' });
     } catch (err) {
       addToast({
@@ -94,11 +93,32 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
     const file = e.target.files?.[0];
     if (!currentProject || !file) return;
     try {
-      const count = await importZipIntoExistingProject(currentProject.id, file);
+      const { count, entry } = await importZipIntoExistingProject(currentProject.id, file);
+      if (entry) openFile(entry);
+      reloadPreview();
       addToast({ title: `Imported ${count} files from ZIP`, kind: 'success' });
     } catch (err) {
       addToast({
         title: 'ZIP import failed',
+        description: err instanceof Error ? err.message : String(err),
+        kind: 'error',
+      });
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleImportFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files;
+    if (!currentProject || !selected || selected.length === 0) return;
+    try {
+      const { count, entry } = await importFolderIntoExistingProject(currentProject.id, selected);
+      if (entry) openFile(entry);
+      reloadPreview();
+      addToast({ title: `Imported ${count} files from folder`, kind: 'success' });
+    } catch (err) {
+      addToast({
+        title: 'Folder import failed',
         description: err instanceof Error ? err.message : String(err),
         kind: 'error',
       });
@@ -207,6 +227,14 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
 
         <input ref={uploadInputRef} type="file" multiple onChange={handleUploadFiles} className="hidden" />
         <input ref={zipInputRef} type="file" accept=".zip" onChange={handleImportZip} className="hidden" />
+        <input
+          ref={folderInputRef}
+          type="file"
+          multiple
+          {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+          onChange={handleImportFolder}
+          className="hidden"
+        />
       </div>
 
       <div
@@ -277,26 +305,7 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
                   style={{ paddingLeft: `${row.depth * 12 + 8}px` }}
                   className="flex-1 min-w-0 flex items-center gap-1.5 py-1.5 text-left text-xs cursor-pointer"
                 >
-                  {row.isFolder ? (
-                    <>
-                      {isOpenDir ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
-                      {row.isBrainFolder ? (
-                        <Brain className="w-3.5 h-3.5 text-kalpa-rose shrink-0" />
-                      ) : isOpenDir ? (
-                        <FolderOpen className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
-                      ) : (
-                        <Folder className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
-                      )}
-                    </>
-                  ) : isImagePath(row.path) ? (
-                    <FileImage className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
-                  ) : row.path.endsWith('.json') ? (
-                    <FileJson className="w-3.5 h-3.5 text-kalpa-warn shrink-0" />
-                  ) : /\.(tsx?|jsx?|py|html|css)$/.test(row.path) ? (
-                    <FileCode className="w-3.5 h-3.5 text-kalpa-violet shrink-0" />
-                  ) : (
-                    <FileText className="w-3.5 h-3.5 text-kalpa-muted shrink-0" />
-                  )}
+                  <FileTreeRowIcon row={row} isOpenDir={isOpenDir} />
                   <span className={`truncate ${row.isBrainFolder ? 'font-semibold text-kalpa-text' : 'font-mono'}`}>
                     {row.name}
                   </span>
@@ -326,13 +335,20 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
           })}
         </div>
 
-        <div className="pt-3 px-2">
+        <div className="pt-3 px-2 flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={() => zipInputRef.current?.click()}
             className="text-[11px] text-kalpa-muted hover:text-kalpa-text underline cursor-pointer"
           >
-            Import ZIP into workspace…
+            Import ZIP…
+          </button>
+          <button
+            type="button"
+            onClick={() => folderInputRef.current?.click()}
+            className="text-[11px] text-kalpa-muted hover:text-kalpa-text underline cursor-pointer"
+          >
+            Import folder…
           </button>
         </div>
       </div>

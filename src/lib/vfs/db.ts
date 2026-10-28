@@ -54,9 +54,16 @@ export interface ChatRecord {
     usage?: { input?: number; output?: number };
     error?: {
       message: string;
+      hint?: string;
+      kind?: string;
       status?: number;
+      rawDetail?: string;
+      extraBodyHint?: string;
       suggestProxy?: boolean;
+      providerKind?: 'openai' | 'anthropic' | 'gemini';
+      baseUrl?: string;
     };
+    notices?: string[];
     model?: string;
     providerLabel?: string;
     turnId?: string;

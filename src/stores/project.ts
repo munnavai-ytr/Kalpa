@@ -1,10 +1,18 @@
 'use client';
 
 import { create } from 'zustand';
-import { getKalpaDB, type ProjectRecord, type StackKind } from '@/lib/vfs/db';
+import { detectProjectType } from '@/lib/agent/reliability';
+import { ensureBrainFiles } from '@/lib/brain/files';
+import { rebuildBrainIndex } from '@/lib/brain/index';
+import { getKalpaDB, setSetting, type ProjectRecord, type StackKind } from '@/lib/vfs/db';
 import { vfs, type VfsFileMeta } from '@/lib/vfs/vfs';
 import { getDefaultOpenFile, getStarterFiles } from '@/lib/vfs/starters';
-import { extractZipEntries, inferStackFromPaths } from '@/lib/vfs/zip';
+import {
+  extractFolderEntries,
+  extractZipEntries,
+  inferStackFromPaths,
+} from '@/lib/vfs/zip';
+import { usePreviewStore } from '@/stores/preview';
 import { uid } from '@/lib/utils';
 
 export type UserEditListener = (event: { projectId: string; path: string; content: string }) => void;
@@ -33,6 +41,7 @@ interface ProjectStoreState {
   loadingProjects: boolean;
 
   currentProject: ProjectRecord | null;
+  snapshotProjectId: string | null;
   files: VfsFileMeta[];
   snapshot: Record<string, string>;
   openTabs: string[];
@@ -51,6 +60,7 @@ interface ProjectStoreState {
   duplicateProject: (id: string) => Promise<ProjectRecord | null>;
   deleteProject: (id: string) => Promise<void>;
   importProjectFromZip: (file: File) => Promise<ProjectRecord>;
+  importProjectFromFolder: (files: FileList | File[], folderName?: string) => Promise<ProjectRecord>;
 
   openWorkspace: (projectId: string) => Promise<boolean>;
   refreshWorkspaceFiles: () => Promise<void>;
@@ -67,6 +77,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   projects: [],
   loadingProjects: true,
   currentProject: null,
+  snapshotProjectId: null,
   files: [],
   snapshot: {},
   openTabs: [],
@@ -90,15 +101,11 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     const db = await getKalpaDB();
     const now = Date.now();
     const id = uid('proj');
+    const cleanPrompt = initialPrompt?.trim() ?? '';
     const derivedName =
       name?.trim() ||
-      (initialPrompt
-        ? initialPrompt
-            .trim()
-            .split(/\s+/)
-            .slice(0, 4)
-            .join(' ')
-            .slice(0, 36)
+      (cleanPrompt
+        ? cleanPrompt.split(/\s+/).slice(0, 4).join(' ').slice(0, 36)
         : `Untitled ${stack === 'auto' ? 'App' : stack}`);
 
     const record: ProjectRecord = {
@@ -111,20 +118,32 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     };
 
     await db.put('projects', record);
-    const starterMap = getStarterFiles(stack);
-    await vfs.writeMany(
-      id,
-      Object.entries(starterMap).map(([path, content]) => ({ path, content, encoding: 'utf8' }))
-    );
 
-    if (initialPrompt && initialPrompt.trim()) {
+    if (cleanPrompt) {
+      // B6: Never seed fake demo starter files when launching an AI prompt from Home.
+      await ensureBrainFiles(id);
       await db.put('chat', {
         id: uid('msg'),
         projectId: id,
         role: 'user',
-        content: initialPrompt.trim(),
+        content: cleanPrompt,
         createdAt: now,
       });
+      await setSetting(`pendingRun:${id}`, {
+        projectId: id,
+        prompt: cleanPrompt,
+        stack,
+        engine,
+        createdAt: now,
+      });
+    } else {
+      const starterMap = getStarterFiles(stack);
+      await vfs.writeMany(
+        id,
+        Object.entries(starterMap).map(([path, content]) => ({ path, content, encoding: 'utf8' }))
+      );
+      await ensureBrainFiles(id);
+      await rebuildBrainIndex(id);
     }
 
     await get().loadProjects();
@@ -190,7 +209,14 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
     await tx.done;
     if (get().currentProject?.id === id) {
-      set({ currentProject: null, files: [], snapshot: {}, openTabs: [], activeFilePath: null });
+      set({
+        currentProject: null,
+        snapshotProjectId: null,
+        files: [],
+        snapshot: {},
+        openTabs: [],
+        activeFilePath: null,
+      });
     }
     await get().loadProjects();
   },
@@ -217,6 +243,39 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     } else {
       await vfs.write(id, 'README.md', `# ${record.name}\n`);
     }
+    await ensureBrainFiles(id);
+    await rebuildBrainIndex(id);
+    await get().loadProjects();
+    return record;
+  },
+
+  importProjectFromFolder: async (files, folderName) => {
+    const list = Array.from(files);
+    const firstRel = (list[0] as (File & { webkitRelativePath?: string }) | undefined)?.webkitRelativePath;
+    const inferredFolder = firstRel && firstRel.includes('/') ? firstRel.split('/')[0] : '';
+    const entries = await extractFolderEntries(list);
+    const paths = entries.map((e) => e.path);
+    const stack = inferStackFromPaths(paths);
+    const baseName = (folderName || inferredFolder || 'Imported Folder').trim();
+    const db = await getKalpaDB();
+    const now = Date.now();
+    const id = uid('proj');
+    const record: ProjectRecord = {
+      id,
+      name: baseName.slice(0, 48),
+      createdAt: now,
+      updatedAt: now,
+      stack,
+      engine: 'instant',
+    };
+    await db.put('projects', record);
+    if (entries.length > 0) {
+      await vfs.writeMany(id, entries);
+    } else {
+      await vfs.write(id, 'README.md', `# ${record.name}\n`);
+    }
+    await ensureBrainFiles(id);
+    await rebuildBrainIndex(id);
     await get().loadProjects();
     return record;
   },
@@ -226,19 +285,34 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       activeUnsubscribe();
       activeUnsubscribe = null;
     }
+    usePreviewStore.getState().resetForProject(projectId);
+    if (get().snapshotProjectId !== projectId) {
+      set({ snapshotProjectId: null, snapshot: {}, files: [], openTabs: [], activeFilePath: null });
+    }
     const db = await getKalpaDB();
     const proj = await db.get('projects', projectId);
     if (!proj) {
-      set({ currentProject: null, files: [], snapshot: {}, openTabs: [], activeFilePath: null });
+      set({
+        currentProject: null,
+        snapshotProjectId: null,
+        files: [],
+        snapshot: {},
+        openTabs: [],
+        activeFilePath: null,
+      });
       return false;
     }
     const [files, snapshot] = await Promise.all([vfs.list(projectId), vfs.snapshot(projectId)]);
     const visiblePaths = files
       .map((f) => f.path)
       .filter((p) => !p.endsWith('/.gitkeep') && !p.startsWith('.kalpa/'));
-    const initialFile = getDefaultOpenFile(proj.stack, visiblePaths);
+    const detectedEntry = detectProjectType(snapshot).entry;
+    const initialFile =
+      (detectedEntry && visiblePaths.includes(detectedEntry) ? detectedEntry : null) ??
+      getDefaultOpenFile(proj.stack, visiblePaths);
     set({
       currentProject: proj,
+      snapshotProjectId: projectId,
       files,
       snapshot,
       openTabs: initialFile ? [initialFile] : [],
@@ -248,7 +322,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     });
 
     activeUnsubscribe = vfs.subscribe(projectId, () => {
-      get().refreshWorkspaceFiles();
+      void get().refreshWorkspaceFiles();
     });
     return true;
   },
@@ -256,14 +330,25 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   refreshWorkspaceFiles: async () => {
     const proj = get().currentProject;
     if (!proj) return;
-    const [files, snapshot] = await Promise.all([vfs.list(proj.id), vfs.snapshot(proj.id)]);
+    const targetId = proj.id;
+    const [files, snapshot] = await Promise.all([vfs.list(targetId), vfs.snapshot(targetId)]);
+    if (get().currentProject?.id !== targetId) return;
     const existingSet = new Set(files.map((f) => f.path));
     const openTabs = get().openTabs.filter((t) => existingSet.has(t));
     let activeFilePath = get().activeFilePath;
     if (activeFilePath && !existingSet.has(activeFilePath)) {
-      activeFilePath = openTabs[openTabs.length - 1] ?? null;
+      const detectedEntry = detectProjectType(snapshot).entry;
+      activeFilePath =
+        openTabs[openTabs.length - 1] ??
+        (detectedEntry && existingSet.has(detectedEntry) ? detectedEntry : null);
+    } else if (!activeFilePath) {
+      const detectedEntry = detectProjectType(snapshot).entry;
+      if (detectedEntry && existingSet.has(detectedEntry)) {
+        activeFilePath = detectedEntry;
+        if (!openTabs.includes(detectedEntry)) openTabs.push(detectedEntry);
+      }
     }
-    set({ files, snapshot, openTabs, activeFilePath });
+    set({ snapshotProjectId: targetId, files, snapshot, openTabs, activeFilePath });
   },
 
   openFile: (path, opts) => {

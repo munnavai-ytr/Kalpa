@@ -4,9 +4,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain,
   FastForward,
-  KeyRound,
   RotateCcw,
   Send,
+  Smartphone,
   Sparkles,
   Square,
   Trash2,
@@ -18,6 +18,7 @@ import { useChatStore } from '@/stores/chat';
 import { useProjectStore } from '@/stores/project';
 import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
+import { ModelChip } from '@/components/ide/ModelChip';
 import { IconButton } from '@/components/ui/IconButton';
 import { StepTracker } from './StepTracker';
 import { LiveStreamingMessage, SavedMessage } from './Message';
@@ -39,6 +40,11 @@ const EXAMPLE_PROMPTS = [
   'Write a clean Python data analyzer script with sample CSV stats and table output',
 ];
 
+function formatCompactTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
 export function ChatPanel() {
   const { breakpoint } = useBreakpoint();
   const currentProject = useProjectStore((s) => s.currentProject);
@@ -57,6 +63,9 @@ export function ChatPanel() {
   const liveItems = useAgentStore((s) => s.liveItems);
   const partialAction = useAgentStore((s) => s.partialAction);
   const pendingQuestion = useAgentStore((s) => s.pendingQuestion);
+  const screenAwakeActive = useAgentStore((s) => s.screenAwakeActive);
+  const sessionTokensIn = useAgentStore((s) => s.sessionTokensIn);
+  const sessionTokensOut = useAgentStore((s) => s.sessionTokensOut);
   const autoContinue = useAgentStore((s) => s.prefs.autoContinue);
   const updatePrefs = useAgentStore((s) => s.updatePrefs);
 
@@ -80,9 +89,7 @@ export function ChatPanel() {
 
   useEffect(() => {
     const el = listRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, liveItems.length, partialAction?.lineCount, streamingText]);
 
   useEffect(() => {
@@ -115,19 +122,31 @@ export function ChatPanel() {
 
   return (
     <div className="h-full flex flex-col bg-kalpa-bg">
-      {/* Header */}
       <div className="h-11 px-3 border-b border-kalpa-border bg-kalpa-bg-2 flex items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <Sparkles className="w-3.5 h-3.5 text-kalpa-violet shrink-0" />
           <span className="text-xs font-semibold text-kalpa-text">Agent</span>
+          {screenAwakeActive ? (
+            <span
+              title="Screen Wake Lock is active while building"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-kalpa-success/15 text-[10px] font-mono text-kalpa-success shrink-0"
+            >
+              <Smartphone className="w-2.5 h-2.5" />
+              screen awake
+            </span>
+          ) : null}
+          {sessionTokensIn > 0 || sessionTokensOut > 0 ? (
+            <span
+              title={`Session tokens — input: ${sessionTokensIn}, output: ${sessionTokensOut}`}
+              className="text-[10px] font-mono text-kalpa-muted tabular-nums truncate"
+            >
+              {formatCompactTokens(sessionTokensIn)} in / {formatCompactTokens(sessionTokensOut)} out
+            </span>
+          ) : null}
         </div>
 
-        <div className="flex items-center gap-0.5">
-          <IconButton
-            label="Open Project Brain"
-            size="sm"
-            onClick={() => setBrainOpen(true)}
-          >
+        <div className="flex items-center gap-0.5 shrink-0">
+          <IconButton label="Open Project Brain" size="sm" onClick={() => setBrainOpen(true)}>
             <Brain className="w-3.5 h-3.5 text-kalpa-violet" />
           </IconButton>
           <IconButton
@@ -149,10 +168,8 @@ export function ChatPanel() {
         </div>
       </div>
 
-      {/* Live S0-S7 Step Tracker / Milestone bar */}
       <StepTracker />
 
-      {/* Message stream */}
       <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-4">
         {windowStart > 0 ? (
           <button
@@ -184,10 +201,7 @@ export function ChatPanel() {
                   <button
                     key={ex}
                     type="button"
-                    onClick={() => {
-                      if (!currentProject) return;
-                      void sendUserMessage(currentProject.id, ex);
-                    }}
+                    onClick={() => currentProject && void sendUserMessage(currentProject.id, ex)}
                     className="text-left p-2.5 rounded-[10px] border border-kalpa-border bg-kalpa-bg-2 hover:border-kalpa-violet/50 hover:bg-kalpa-surface text-xs text-kalpa-text transition-colors cursor-pointer"
                   >
                     {ex}
@@ -204,6 +218,7 @@ export function ChatPanel() {
             msg={msg}
             onRetry={() => currentProject && regenerateLast(currentProject.id)}
             onEnableProxyAndRetry={handleEnableProxyAndRetry}
+            onSwitchModel={() => setModelSheetOpen(true)}
           />
         ))}
 
@@ -222,12 +237,10 @@ export function ChatPanel() {
         ) : null}
       </div>
 
-      {/* Composer */}
       <form
         onSubmit={handleSend}
         className="relative p-2.5 border-t border-kalpa-border bg-kalpa-bg-2 shrink-0 space-y-2"
       >
-        {/* Slash command popup */}
         {matchingSlash.length > 0 ? (
           <div className="absolute left-2.5 right-2.5 bottom-full mb-1.5 z-30 rounded-[12px] border border-kalpa-border bg-kalpa-bg-2 shadow-kalpa-soft p-1.5 space-y-0.5">
             {matchingSlash.map((item) => (
@@ -289,18 +302,8 @@ export function ChatPanel() {
           )}
         </div>
 
-        {/* Bottom quick controls: Model chip + Auto-continue toggle */}
         <div className="flex items-center justify-between gap-2 px-0.5 text-[11px]">
-          <button
-            type="button"
-            onClick={() => setModelSheetOpen(true)}
-            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[7px] bg-kalpa-surface/70 hover:bg-kalpa-surface text-kalpa-muted hover:text-kalpa-text truncate max-w-[60%] cursor-pointer"
-          >
-            <KeyRound className="w-3 h-3 text-kalpa-violet shrink-0" />
-            <span className="truncate font-mono">
-              {activeProfile ? activeProfile.model : 'Add AI key'}
-            </span>
-          </button>
+          <ModelChip onClick={() => setModelSheetOpen(true)} compact className="max-w-[60%]" />
 
           <button
             type="button"

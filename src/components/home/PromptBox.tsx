@@ -1,11 +1,12 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Cloud, Cpu, KeyRound } from 'lucide-react';
+import { ArrowRight, Cloud, Cpu } from 'lucide-react';
 import type { EngineKind, StackKind } from '@/lib/vfs/db';
 import { useProviderStore } from '@/lib/providers/store';
 import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
+import { ModelChip } from '@/components/ide/ModelChip';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { StackChips } from './StackChips';
@@ -29,12 +30,7 @@ export function PromptBox({ onRun, onOpenModelSheet, running }: PromptBoxProps) 
   const { breakpoint } = useBreakpoint();
   const reduceMotion = useUiStore((s) => s.reduceMotion);
   const addToast = useUiStore((s) => s.addToast);
-  const profiles = useProviderStore((s) => s.profiles);
-  const activeProfileId = useProviderStore((s) => s.activeProfileId);
   const e2bApiKey = useProviderStore((s) => s.e2bApiKey);
-
-  const activeProfile =
-    profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null;
 
   const [prompt, setPrompt] = useState('');
   const [stack, setStack] = useState<StackKind>('auto');
@@ -141,18 +137,7 @@ export function PromptBox({ onRun, onOpenModelSheet, running }: PromptBoxProps) 
 
           <div className="flex flex-wrap items-center justify-between gap-2.5 pt-2 border-t border-kalpa-border">
             <div className="flex flex-wrap items-center gap-2 min-w-0">
-              <Chip
-                onClick={onOpenModelSheet}
-                active={Boolean(activeProfile)}
-                icon={<KeyRound className="w-3.5 h-3.5" />}
-                className="max-w-[210px]"
-              >
-                <span className="truncate">
-                  {activeProfile
-                    ? `${activeProfile.label} · ${activeProfile.model}`
-                    : 'Add key'}
-                </span>
-              </Chip>
+              <ModelChip onClick={onOpenModelSheet} className="max-w-[260px]" />
 
               <Chip
                 active

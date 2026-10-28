@@ -1,4 +1,5 @@
-import { ActionStream, type Action } from './actions';
+import type { Action } from './actions';
+import { parseWithFallback } from './reliability';
 
 function summarizeAction(action: Exclude<Action, { type: 'text' }>): string {
   switch (action.type) {
@@ -36,28 +37,21 @@ function summarizeAction(action: Exclude<Action, { type: 'text' }>): string {
 }
 
 /**
- * Re-parses an older assistant message with ActionStream and replaces verbose
+ * Re-parses an older assistant message with parseWithFallback and replaces verbose
  * action blocks with compact single-line summaries while preserving plain text.
  */
 export function compactAssistantMessage(rawContent: string): string {
   if (!rawContent) return '';
-  const stream = new ActionStream();
+  const { actions } = parseWithFallback(rawContent);
   const segments: string[] = [];
-
-  const handleActions = (actions: Action[]) => {
-    for (const a of actions) {
-      if (a.type === 'text') {
-        if (a.text.trim()) segments.push(a.text.trim());
-      } else {
-        const line = summarizeAction(a);
-        if (line) segments.push(line);
-      }
+  for (const a of actions) {
+    if (a.type === 'text') {
+      if (a.text.trim()) segments.push(a.text.trim());
+    } else {
+      const line = summarizeAction(a);
+      if (line) segments.push(line);
     }
-  };
-
-  handleActions(stream.push(rawContent));
-  handleActions(stream.end().actions);
-
+  }
   return segments.join('\n');
 }
 

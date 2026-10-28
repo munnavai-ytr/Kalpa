@@ -3,12 +3,13 @@
 import { create } from 'zustand';
 import { getKalpaDB, type ChatRecord } from '@/lib/vfs/db';
 import { vfs } from '@/lib/vfs/vfs';
-import { streamChat, type ChatMessage } from '@/lib/providers/core';
+import type { ChatMessage } from '@/lib/providers/core';
 import { useProviderStore } from '@/lib/providers/store';
 import { APP_NAME } from '@/lib/brand';
 import { uid } from '@/lib/utils';
 import { runTurn } from '@/lib/agent/orchestrator';
 import { buildContinueMessage } from '@/lib/agent/prompts/system';
+import { streamWithRecovery, TerminalProviderError } from '@/lib/agent/recovery';
 import { parseMilestonesFromTasks, readAllBrainMemory } from '@/lib/brain/files';
 import { useAgentStore } from './agent';
 import { useBrainStore } from './brain';
@@ -24,7 +25,7 @@ interface ChatStoreState {
   loadChat: (projectId: string) => Promise<ChatRecord[]>;
   setComposerDraft: (draft: string) => void;
   sendUserMessage: (projectId: string, text: string) => Promise<void>;
-  runInitialProjectTurn: (projectId: string, initialPrompt: string) => Promise<void>;
+  runInitialProjectTurn: (projectId: string, initialPrompt: string, hasPersistedUserMsg?: boolean) => Promise<void>;
   streamPlainChatReply: (projectId: string, text: string) => Promise<void>;
   stopStreaming: () => void;
   regenerateLast: (projectId: string) => Promise<void>;
@@ -67,7 +68,6 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     if (!trimmed) return;
     if (get().isStreaming || useAgentStore.getState().isRunning) return;
 
-    // Slash command router
     if (trimmed === '/brain') {
       useBrainStore.getState().setBrainOpen(true);
       return;
@@ -86,20 +86,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     if (trimmed === '/undo') {
       const res = await useAgentStore.getState().undoTurnMessage(projectId);
       await get().loadChat(projectId);
-      useUiStore.getState().addToast({
-        title: res.label,
-        kind: res.ok ? 'success' : 'warn',
-      });
+      useUiStore.getState().addToast({ title: res.label, kind: res.ok ? 'success' : 'warn' });
       return;
     }
 
     if (trimmed === '/redo') {
       const res = await useAgentStore.getState().redoTurnMessage(projectId);
       await get().loadChat(projectId);
-      useUiStore.getState().addToast({
-        title: res.label,
-        kind: res.ok ? 'success' : 'warn',
-      });
+      useUiStore.getState().addToast({ title: res.label, kind: res.ok ? 'success' : 'warn' });
       return;
     }
 
@@ -141,16 +135,15 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       return;
     }
 
-    // Default: full Kalpa Agent Engine turn
     await runTurn(projectId, trimmed, {
       onMessagesChanged: (msgs) => set({ messages: msgs }),
     });
   },
 
-  runInitialProjectTurn: async (projectId, initialPrompt) => {
+  runInitialProjectTurn: async (projectId, initialPrompt, hasPersistedUserMsg = true) => {
     await runTurn(projectId, initialPrompt, {
       mode: 'NEW_PROJECT',
-      skipAddingUserMessage: true,
+      skipAddingUserMessage: hasPersistedUserMsg,
       onMessagesChanged: (msgs) => set({ messages: msgs }),
     });
   },
@@ -169,8 +162,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const history = [...get().messages, userMsg];
     set({ messages: history });
 
-    const profile = useProviderStore.getState().getActiveProfile();
-    if (!profile || (!profile.apiKey && !/localhost|127\.0\.0\.1/.test(profile.baseUrl))) {
+    let activeProfile = useProviderStore.getState().getActiveProfile();
+    if (!activeProfile || (!activeProfile.apiKey && !/localhost|127\.0\.0\.1/.test(activeProfile.baseUrl))) {
       const errMsg: ChatRecord = {
         id: uid('msg'),
         projectId,
@@ -180,7 +173,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         meta: {
           plainChat: true,
           error: {
-            message: 'No active provider API key configured. Add a key via the model switcher or Settings.',
+            kind: 'auth',
+            message: 'No active provider API key configured.',
+            hint: 'Add a key via the model switcher or Settings -> Providers.',
           },
         },
       };
@@ -206,6 +201,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     let fullText = '';
     let usage: { input?: number; output?: number } | undefined;
     let rafPending = false;
+    const { prefs } = useAgentStore.getState();
 
     const flushUi = () => {
       rafPending = false;
@@ -213,7 +209,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     };
 
     try {
-      for await (const ev of streamChat(profile, apiMessages, controller.signal)) {
+      for await (const ev of streamWithRecovery(activeProfile, apiMessages, {
+        signal: controller.signal,
+        idleTimeoutMs: prefs.idleTimeoutMs,
+        economyOverride: prefs.economyMode,
+        onProfileSwitched: (next) => { activeProfile = next; },
+      })) {
         if (ev.delta) {
           fullText += ev.delta;
           if (!rafPending) {
@@ -226,6 +227,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
             input: ev.usage.input ?? usage?.input,
             output: ev.usage.output ?? usage?.output,
           };
+          useAgentStore.getState().addSessionTokens(ev.usage.input ?? 0, ev.usage.output ?? 0);
         }
       }
 
@@ -238,8 +240,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         meta: {
           plainChat: true,
           usage,
-          model: profile.model,
-          providerLabel: profile.label,
+          model: activeProfile.model,
+          providerLabel: activeProfile.label,
         },
       };
       await db.put('chat', assistantRecord);
@@ -249,8 +251,24 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         streamingText: '',
       }));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
       if (!controller.signal.aborted) {
+        const errMeta: NonNullable<ChatRecord['meta']>['error'] =
+          err instanceof TerminalProviderError
+            ? {
+                message: err.classified.message,
+                hint: err.classified.hint,
+                kind: err.classified.kind,
+                status: err.status,
+                rawDetail: err.rawDetail,
+                suggestProxy: err.suggestProxy,
+                providerKind: err.profile.kind,
+                baseUrl: err.profile.baseUrl,
+              }
+            : {
+                message: err instanceof Error ? err.message : String(err),
+                providerKind: activeProfile.kind,
+                baseUrl: activeProfile.baseUrl,
+              };
         const errRecord: ChatRecord = {
           id: uid('msg'),
           projectId,
@@ -259,9 +277,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           createdAt: Date.now(),
           meta: {
             plainChat: true,
-            error: { message: msg },
-            model: profile.model,
-            providerLabel: profile.label,
+            error: errMeta,
+            model: activeProfile.model,
+            providerLabel: activeProfile.label,
           },
         };
         await db.put('chat', errRecord);

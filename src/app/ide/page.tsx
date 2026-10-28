@@ -1,8 +1,9 @@
 'use client';
 
-import React, { Suspense, useEffect, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
+import { deleteSetting, getSetting, type EngineKind, type StackKind } from '@/lib/vfs/db';
 import { useProjectStore } from '@/stores/project';
 import { useChatStore } from '@/stores/chat';
 import { useBrainStore } from '@/stores/brain';
@@ -15,10 +16,19 @@ import { Button } from '@/components/ui/Button';
 
 export const dynamic = 'force-dynamic';
 
+export interface PendingRunRecord {
+  projectId: string;
+  prompt: string;
+  stack: StackKind;
+  engine: EngineKind;
+  createdAt: number;
+}
+
+const startedPendingRuns = new Set<string>();
+
 function IdeRouteInner() {
   const searchParams = useSearchParams();
   const projectId = searchParams.get('p');
-  const shouldAutoRun = searchParams.get('run') === '1';
 
   const openWorkspace = useProjectStore((s) => s.openWorkspace);
   const loadChat = useChatStore((s) => s.loadChat);
@@ -29,7 +39,6 @@ function IdeRouteInner() {
   const initProviders = useProviderStore((s) => s.initProviders);
 
   const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading');
-  const ranInitialRef = useRef<string | null>(null);
 
   useEffect(() => {
     hydratePrefs();
@@ -42,14 +51,18 @@ function IdeRouteInner() {
     }
 
     let cancelled = false;
-    setStatus('loading');
+    if (useProjectStore.getState().currentProject?.id !== projectId) {
+      setStatus('loading');
+    }
 
     (async () => {
       await initProviders();
-      const [found, history] = await Promise.all([
+      const pendingKey = `pendingRun:${projectId}`;
+      const [found, history, , pending] = await Promise.all([
         openWorkspace(projectId),
         loadChat(projectId),
         loadBrain(projectId),
+        getSetting<PendingRunRecord>(pendingKey),
       ]);
       if (cancelled) return;
       if (!found) {
@@ -64,18 +77,24 @@ function IdeRouteInner() {
 
       setStatus('ready');
 
-      if (
-        shouldAutoRun &&
-        ranInitialRef.current !== projectId &&
-        history.length > 0 &&
-        history[history.length - 1].role === 'user'
-      ) {
-        ranInitialRef.current = projectId;
-        if (typeof window !== 'undefined') {
+      const urlHasRun =
+        typeof window !== 'undefined' &&
+        new URLSearchParams(window.location.search).get('run') === '1';
+      const lastMsg = history[history.length - 1];
+      const promptToRun =
+        pending?.prompt ||
+        (urlHasRun && lastMsg?.role === 'user' ? lastMsg.content : null);
+
+      if (promptToRun && !startedPendingRuns.has(projectId)) {
+        startedPendingRuns.add(projectId);
+        await deleteSetting(pendingKey);
+        if (typeof window !== 'undefined' && urlHasRun) {
           window.history.replaceState(null, '', `/ide?p=${encodeURIComponent(projectId)}`);
         }
-        const initialPrompt = history[history.length - 1].content;
-        void runInitialProjectTurn(projectId, initialPrompt);
+        const hasPersistedUserMsg = history.some(
+          (m) => m.role === 'user' && m.content.trim() === promptToRun.trim()
+        );
+        void runInitialProjectTurn(projectId, promptToRun, hasPersistedUserMsg);
       }
     })();
 
@@ -84,7 +103,6 @@ function IdeRouteInner() {
     };
   }, [
     projectId,
-    shouldAutoRun,
     initProviders,
     openWorkspace,
     loadChat,

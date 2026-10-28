@@ -4,7 +4,7 @@ import React, { useMemo } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { FileCode2 } from 'lucide-react';
-import { ActionStream, type Action } from '@/lib/agent/actions';
+import { parseWithFallback } from '@/lib/agent/reliability';
 import type { ChatRecord, TurnFileChange } from '@/lib/vfs/db';
 import { vfs } from '@/lib/vfs/vfs';
 import type {
@@ -30,7 +30,8 @@ import { TurnFooter } from './TurnFooter';
 function renderSingleActionCard(
   action: ExecutableAction,
   outcome?: ActionOutcomeMeta,
-  isLivePendingQuestion = false
+  isLivePendingQuestion = false,
+  filesChangedCount?: number
 ) {
   switch (action.type) {
     case 'status':
@@ -60,7 +61,7 @@ function renderSingleActionCard(
       );
     case 'complete':
     case 'finished':
-      return <MilestoneCard action={action} />;
+      return <MilestoneCard action={action} filesChangedCount={filesChangedCount} />;
   }
 }
 
@@ -68,32 +69,27 @@ function parseSavedAssistantContent(
   raw: string,
   filesChanged?: TurnFileChange[]
 ): LiveStreamItem[] {
-  const stream = new ActionStream();
+  const { actions } = parseWithFallback(raw);
   const items: LiveStreamItem[] = [];
   const changeByPath = new Map((filesChanged ?? []).map((f) => [f.path, f]));
   let idx = 0;
 
-  const pushActions = (actions: Action[]) => {
-    for (const a of actions) {
-      if (a.type === 'text') {
-        const last = items[items.length - 1];
-        if (last && last.kind === 'text') last.text += `\n\n${a.text}`;
-        else items.push({ id: `s-txt-${idx++}`, kind: 'text', text: a.text });
-      } else {
-        let outcome: ActionOutcomeMeta | undefined;
-        if (a.type === 'file' || a.type === 'edit') {
-          const fc = changeByPath.get(a.path);
-          if (fc) {
-            outcome = { ok: true, beforeContent: fc.before, afterContent: fc.after };
-          }
+  for (const a of actions) {
+    if (a.type === 'text') {
+      const last = items[items.length - 1];
+      if (last && last.kind === 'text') last.text += `\n\n${a.text}`;
+      else items.push({ id: `s-txt-${idx++}`, kind: 'text', text: a.text });
+    } else {
+      let outcome: ActionOutcomeMeta | undefined;
+      if (a.type === 'file' || a.type === 'edit') {
+        const fc = changeByPath.get(a.path);
+        if (fc) {
+          outcome = { ok: true, beforeContent: fc.before, afterContent: fc.after };
         }
-        items.push({ id: `s-act-${idx++}`, kind: 'action', action: a, outcome });
       }
+      items.push({ id: `s-act-${idx++}`, kind: 'action', action: a, outcome });
     }
-  };
-
-  pushActions(stream.push(raw));
-  pushActions(stream.end().actions);
+  }
   return items;
 }
 
@@ -143,9 +139,15 @@ export interface SavedMessageProps {
   msg: ChatRecord;
   onRetry?: () => void;
   onEnableProxyAndRetry?: () => void;
+  onSwitchModel?: () => void;
 }
 
-export function SavedMessage({ msg, onRetry, onEnableProxyAndRetry }: SavedMessageProps) {
+export function SavedMessage({
+  msg,
+  onRetry,
+  onEnableProxyAndRetry,
+  onSwitchModel,
+}: SavedMessageProps) {
   const parsedItems = useMemo(() => {
     if (msg.role !== 'assistant' || msg.meta?.plainChat) return null;
     return parseSavedAssistantContent(msg.content, msg.meta?.filesChanged);
@@ -170,8 +172,23 @@ export function SavedMessage({ msg, onRetry, onEnableProxyAndRetry }: SavedMessa
     );
   }
 
+  const filesChangedCount = msg.meta?.filesChanged?.length;
+
   return (
     <div className="space-y-2 pr-1">
+      {msg.meta?.notices && msg.meta.notices.length > 0 ? (
+        <div className="space-y-1">
+          {msg.meta.notices.map((n, idx) => (
+            <div
+              key={`${n}-${idx}`}
+              className="px-2.5 py-1.5 rounded-[8px] bg-kalpa-surface/80 border border-kalpa-border text-[11px] font-mono text-kalpa-muted"
+            >
+              {n}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {msg.meta?.plainChat ? (
         msg.content.trim() ? (
           <div className="rounded-[14px] p-3.5 bg-kalpa-bg-2 border border-kalpa-border">
@@ -185,7 +202,7 @@ export function SavedMessage({ msg, onRetry, onEnableProxyAndRetry }: SavedMessa
             if (!clean) return null;
             return <MarkdownProse key={item.id} text={clean} />;
           }
-          const card = renderSingleActionCard(item.action, item.outcome, false);
+          const card = renderSingleActionCard(item.action, item.outcome, false, filesChangedCount);
           return card ? <div key={item.id}>{card}</div> : null;
         })
       )}
@@ -193,9 +210,16 @@ export function SavedMessage({ msg, onRetry, onEnableProxyAndRetry }: SavedMessa
       {msg.meta?.error ? (
         <ErrorCard
           message={msg.meta.error.message}
+          hint={msg.meta.error.hint}
+          kind={msg.meta.error.kind}
+          rawDetail={msg.meta.error.rawDetail}
+          extraBodyHint={msg.meta.error.extraBodyHint}
           suggestProxy={msg.meta.error.suggestProxy}
+          providerKind={msg.meta.error.providerKind}
+          baseUrl={msg.meta.error.baseUrl}
           onRetry={onRetry}
           onEnableProxyAndRetry={onEnableProxyAndRetry}
+          onSwitchModel={onSwitchModel}
         />
       ) : null}
 

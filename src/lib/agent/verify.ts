@@ -83,15 +83,28 @@ export async function verifyWorkspaceAfterWrites(
 
   // Instant Engine verification
   const snap = await vfs.snapshot(projectId);
-  const projectType = detectProjectType(snap);
+  const det = detectProjectType(snap);
   const tStart = performance.now();
 
-  // Pure Python or JS script verification in Worker
-  if (projectType === 'python') {
+  if (det.type === 'empty') {
+    return { hasError: false, errorSignature: '', resultBlocks: [] };
+  }
+
+  if (det.type === 'cloud-only') {
+    return {
+      hasError: false,
+      errorSignature: '',
+      resultBlocks: [formatPreviewResult('ok', 0, `Cloud-only stack (${det.reason})`)],
+    };
+  }
+
+  // Pure Python or JS/TS script verification in Worker
+  if (det.type === 'python') {
     const entry =
-      snap['main.py'] !== undefined
+      det.entry ||
+      (snap['main.py'] !== undefined
         ? 'main.py'
-        : Object.keys(snap).find((p) => p.endsWith('.py') && !p.startsWith('.kalpa/'));
+        : Object.keys(snap).find((p) => p.endsWith('.py') && !p.startsWith('.kalpa/')));
     if (entry) {
       const filesForPy: Record<string, string> = {};
       for (const [k, v] of Object.entries(snap)) {
@@ -129,18 +142,21 @@ export async function verifyWorkspaceAfterWrites(
     }
   }
 
-  if (projectType === 'js') {
+  if (det.type === 'node-script') {
     const entry =
-      snap['index.js'] !== undefined
+      det.entry ||
+      (snap['index.js'] !== undefined
         ? 'index.js'
         : snap['main.js'] !== undefined
           ? 'main.js'
-          : Object.keys(snap).find((p) => p.endsWith('.js') && !p.startsWith('.kalpa/'));
-    if (entry) {
+          : Object.keys(snap).find((p) => /\.(js|mjs|cjs)$/.test(p) && !p.startsWith('.kalpa/')));
+    if (entry && snap[entry] !== undefined) {
       const stderrLines: string[] = [];
       const stdoutLines: string[] = [];
       const res = await runJsInWorker({
+        entryFile: entry,
         code: snap[entry],
+        files: snap,
         onStdout: (l) => stdoutLines.push(l),
         onStderr: (l) => stderrLines.push(l),
         timeoutMs: 5_000,
@@ -164,7 +180,7 @@ export async function verifyWorkspaceAfterWrites(
     }
   }
 
-  // Web preview (Static HTML or Sandpack React/Next-Lite/Vue/Svelte): wait up to 4s to settle
+  // Web preview (Static HTML or Sandpack React/Next-Lite): wait up to 4s to settle
   usePreviewStore.getState().clearEntries();
   const deadline = Date.now() + 4000;
   while (Date.now() < deadline) {

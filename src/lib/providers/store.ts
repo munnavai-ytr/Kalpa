@@ -9,6 +9,11 @@ import {
   type ProviderKind,
 } from './core';
 import {
+  fetchOpenRouterKeyCredits,
+  isOpenRouterUrl,
+  type OpenRouterCreditInfo,
+} from './credits';
+import {
   loadVaultState,
   persistVaultSecrets,
   unlockEncryptedVault,
@@ -48,9 +53,14 @@ export interface ProviderProfile {
   apiKey: string;
   model: string;
   maxOutputTokens: number;
+  effectiveMaxOutput?: number;
   contextTokens: number;
   temperature?: number;
   useProxy: boolean;
+  economyMode?: boolean;
+  strictFormat?: boolean;
+  quotaErrorCount?: number;
+  extraBody?: Record<string, unknown>;
 }
 
 export interface FetchedModel {
@@ -72,13 +82,14 @@ type StoredProfileMeta = Omit<ProviderProfile, 'apiKey'>;
 
 const PROFILES_META_KEY = 'provider_profiles_meta';
 const ACTIVE_PROFILE_KEY = 'active_profile_id';
+const FALLBACK_IDS_KEY = 'fallback_profile_ids';
+const AUTO_SWITCH_QUOTA_KEY = 'auto_switch_on_quota';
 
 let sessionPassphrase: string | undefined;
 
 function isCorsOrNetworkFailure(err: unknown, baseUrl: string): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  const isLocal = /localhost|127\.0\.0\.1/.test(baseUrl);
-  if (isLocal) return false;
+  if (/localhost|127\.0\.0\.1/.test(baseUrl)) return false;
   return /failed to fetch|networkerror|load failed|cors/i.test(msg);
 }
 
@@ -86,6 +97,9 @@ interface ProviderStoreState {
   initialized: boolean;
   profiles: ProviderProfile[];
   activeProfileId: string | null;
+  fallbackProfileIds: string[];
+  autoSwitchOnQuota: boolean;
+  openRouterCredits: Record<string, OpenRouterCreditInfo>;
   vaultMode: VaultMode;
   vaultLocked: boolean;
   e2bApiKey: string;
@@ -96,9 +110,13 @@ interface ProviderStoreState {
   unlockVault: (passphrase: string) => Promise<void>;
   changeVaultMode: (mode: VaultMode, passphrase?: string) => Promise<void>;
   upsertProfile: (profile: Omit<ProviderProfile, 'id'> & { id?: string }) => Promise<ProviderProfile>;
+  patchProfileMeta: (id: string, patch: Partial<Omit<ProviderProfile, 'id' | 'apiKey'>>) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
   removeProfileKey: (id: string) => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
+  setFallbackProfileIds: (ids: string[]) => Promise<void>;
+  setAutoSwitchOnQuota: (enabled: boolean) => Promise<void>;
+  refreshOpenRouterCredit: (profileId: string) => Promise<OpenRouterCreditInfo | null>;
   setE2bApiKey: (key: string) => Promise<void>;
   setGithubToken: (token: string) => Promise<void>;
   fetchModels: (cfg: Pick<ProviderConfig, 'kind' | 'baseUrl' | 'apiKey' | 'useProxy'>) => Promise<FetchedModel[]>;
@@ -130,6 +148,9 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
   initialized: false,
   profiles: [],
   activeProfileId: null,
+  fallbackProfileIds: [],
+  autoSwitchOnQuota: true,
+  openRouterCredits: {},
   vaultMode: 'device',
   vaultLocked: false,
   e2bApiKey: '',
@@ -137,9 +158,11 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
 
   initProviders: async () => {
     if (get().initialized) return;
-    const [metas, activeId, vault] = await Promise.all([
+    const [metas, activeId, fallbackIds, autoSwitch, vault] = await Promise.all([
       getSetting<StoredProfileMeta[]>(PROFILES_META_KEY),
       getSetting<string | null>(ACTIVE_PROFILE_KEY),
+      getSetting<string[]>(FALLBACK_IDS_KEY),
+      getSetting<boolean>(AUTO_SWITCH_QUOTA_KEY),
       loadVaultState(),
     ]);
     const list: ProviderProfile[] = (metas ?? []).map((m) => ({
@@ -148,15 +171,22 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
     }));
     const validActive =
       activeId && list.some((p) => p.id === activeId) ? activeId : (list[0]?.id ?? null);
+    const validFallbacks = (fallbackIds ?? []).filter((id) => list.some((p) => p.id === id));
     set({
       initialized: true,
       profiles: list,
       activeProfileId: validActive,
+      fallbackProfileIds: validFallbacks,
+      autoSwitchOnQuota: autoSwitch ?? true,
       vaultMode: vault.mode,
       vaultLocked: vault.locked,
       e2bApiKey: vault.secrets.e2bApiKey ?? '',
       githubToken: vault.secrets.githubToken ?? '',
     });
+    const active = list.find((p) => p.id === validActive);
+    if (active && active.apiKey && isOpenRouterUrl(active.baseUrl)) {
+      void get().refreshOpenRouterCredit(active.id);
+    }
   },
 
   getActiveProfile: () => {
@@ -195,6 +225,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
 
   upsertProfile: async (input) => {
     const id = input.id || uid('prov');
+    const existing = get().profiles.find((p) => p.id === id);
     const full: ProviderProfile = {
       id,
       label: input.label.trim() || 'Provider',
@@ -203,26 +234,47 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
       apiKey: input.apiKey.trim(),
       model: input.model.trim(),
       maxOutputTokens: input.maxOutputTokens || 8192,
+      effectiveMaxOutput:
+        existing && existing.model === input.model.trim() && existing.apiKey === input.apiKey.trim()
+          ? existing.effectiveMaxOutput
+          : input.effectiveMaxOutput,
       contextTokens: input.contextTokens || 128000,
       temperature: input.temperature,
       useProxy: Boolean(input.useProxy),
+      economyMode: input.economyMode ?? existing?.economyMode ?? false,
+      strictFormat: input.strictFormat ?? existing?.strictFormat ?? false,
+      quotaErrorCount: existing?.quotaErrorCount ?? 0,
+      extraBody: input.extraBody,
     };
     const prev = get().profiles;
-    const exists = prev.some((p) => p.id === id);
-    const profiles = exists ? prev.map((p) => (p.id === id ? full : p)) : [...prev, full];
+    const profiles = prev.some((p) => p.id === id)
+      ? prev.map((p) => (p.id === id ? full : p))
+      : [...prev, full];
     const activeProfileId = get().activeProfileId ?? id;
     set({ profiles, activeProfileId });
     if (!get().vaultLocked) {
       await saveAllToStorage(profiles, activeProfileId, get().vaultMode, get().e2bApiKey, get().githubToken);
     }
+    if (full.apiKey && isOpenRouterUrl(full.baseUrl)) {
+      void get().refreshOpenRouterCredit(full.id);
+    }
     return full;
+  },
+
+  patchProfileMeta: async (id, patch) => {
+    const profiles = get().profiles.map((p) => (p.id === id ? { ...p, ...patch } : p));
+    set({ profiles });
+    const metas: StoredProfileMeta[] = profiles.map(({ apiKey: _omit, ...rest }) => rest);
+    await setSetting(PROFILES_META_KEY, metas);
   },
 
   deleteProfile: async (id) => {
     const profiles = get().profiles.filter((p) => p.id !== id);
     const activeProfileId =
       get().activeProfileId === id ? (profiles[0]?.id ?? null) : get().activeProfileId;
-    set({ profiles, activeProfileId });
+    const fallbackProfileIds = get().fallbackProfileIds.filter((fid) => fid !== id);
+    set({ profiles, activeProfileId, fallbackProfileIds });
+    await setSetting(FALLBACK_IDS_KEY, fallbackProfileIds);
     if (!get().vaultLocked) {
       await saveAllToStorage(profiles, activeProfileId, get().vaultMode, get().e2bApiKey, get().githubToken);
     }
@@ -239,6 +291,30 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
   setActiveProfile: async (id) => {
     set({ activeProfileId: id });
     await setSetting(ACTIVE_PROFILE_KEY, id);
+    const prof = get().profiles.find((p) => p.id === id);
+    if (prof && prof.apiKey && isOpenRouterUrl(prof.baseUrl)) {
+      void get().refreshOpenRouterCredit(prof.id);
+    }
+  },
+
+  setFallbackProfileIds: async (fallbackProfileIds) => {
+    set({ fallbackProfileIds });
+    await setSetting(FALLBACK_IDS_KEY, fallbackProfileIds);
+  },
+
+  setAutoSwitchOnQuota: async (autoSwitchOnQuota) => {
+    set({ autoSwitchOnQuota });
+    await setSetting(AUTO_SWITCH_QUOTA_KEY, autoSwitchOnQuota);
+  },
+
+  refreshOpenRouterCredit: async (profileId) => {
+    const prof = get().profiles.find((p) => p.id === profileId);
+    if (!prof || !prof.apiKey || !isOpenRouterUrl(prof.baseUrl)) return null;
+    const info = await fetchOpenRouterKeyCredits(prof.baseUrl, prof.apiKey, prof.useProxy);
+    if (info) {
+      set((s) => ({ openRouterCredits: { ...s.openRouterCredits, [profileId]: info } }));
+    }
+    return info;
   },
 
   setE2bApiKey: async (e2bApiKey) => {
@@ -264,18 +340,12 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
           body: JSON.stringify({ url: req.url, method: 'GET', headers: req.init.headers }),
         })
       : await fetch(req.url, req.init);
-
     if (!res.ok) {
       let detail = '';
-      try {
-        detail = (await res.text()).slice(0, 300);
-      } catch {
-        // ignore
-      }
+      try { detail = (await res.text()).slice(0, 300); } catch { /* ignore */ }
       throw new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`);
     }
-    const json = await res.json();
-    return parseModels(cfg.kind, json);
+    return parseModels(cfg.kind, await res.json());
   },
 
   testConnection: async (cfg) => {
@@ -289,9 +359,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
       };
       for await (const ev of streamChat(testCfg, [{ role: 'user', content: 'Say OK' }])) {
         if (ev.delta) {
-          if (ttftMs === undefined) {
-            ttftMs = Math.round(performance.now() - start);
-          }
+          if (ttftMs === undefined) ttftMs = Math.round(performance.now() - start);
           reply += ev.delta;
         }
       }
@@ -302,11 +370,10 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
         reply: reply.trim() || '(empty stream completed)',
       };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
       return {
         ok: false,
         totalMs: Math.round(performance.now() - start),
-        error: msg,
+        error: err instanceof Error ? err.message : String(err),
         suggestProxy: !cfg.useProxy && isCorsOrNetworkFailure(err, cfg.baseUrl),
       };
     }

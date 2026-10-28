@@ -1,4 +1,4 @@
-import type { EngineKind } from '@/lib/vfs/db';
+import type { EngineKind, StackKind } from '@/lib/vfs/db';
 import { CONSTITUTION } from './constitution';
 
 export type AgentMode = 'NEW_PROJECT' | 'CONTINUE' | 'CHANGE' | 'PLAN';
@@ -15,11 +15,16 @@ export function environmentBlock(opts: {
   engine: EngineKind;
   userText: string;
   mode: AgentMode;
+  preferredStack?: StackKind;
 }): string {
   const isCloud = opts.engine === 'cloud';
   const today = new Date().toISOString().slice(0, 10);
   const lang = detectUserLanguage(opts.userText);
   const effectiveMode = opts.mode === 'PLAN' ? 'CHANGE' : opts.mode;
+  const stackLine =
+    opts.preferredStack && opts.preferredStack !== 'auto'
+      ? `\npreferred_stack: ${opts.preferredStack}`
+      : '';
 
   return `<environment>
 engine: ${isCloud ? 'cloud' : 'instant'}
@@ -45,7 +50,7 @@ tailwind: ${
 file_limits: max 2MB per file, max 2000 files, paths relative to project root, never touch .kalpa/ directly
 user_language: ${lang}
 today: ${today}
-mode: ${effectiveMode}
+mode: ${effectiveMode}${stackLine}
 </environment>`;
 }
 
@@ -57,6 +62,11 @@ export const NEW_PROJECT_PREAMBLE =
 export const PLAN_ONLY_PREAMBLE =
   'PLAN MODE (/plan): Update project memory (brief, architecture, conventions, decisions, tasks) and present a clear milestone plan to the user. ' +
   'Do NOT create, edit, move, or delete any source code files in this turn, and end with <finished />.';
+
+export const STRICT_FORMAT_REMINDER =
+  'STRICT ACTION FORMAT REQUIRED: Never paste source files inside ```markdown``` code fences and never claim "Done" without emitting XML action tags. ' +
+  'Every file creation MUST use <file path="relative/path.ext"> on its own line, raw code without fences, and </file> on its own line. ' +
+  'Every edit MUST use <edit path="..."><find>...</find><replace>...</replace></edit>.';
 
 export function buildContinueMessage(nextMilestone: string): string {
   return (
@@ -73,12 +83,20 @@ export function buildTruncationMessage(partialHint: string): string {
   );
 }
 
+export function buildInterruptedResumeMessage(): string {
+  return (
+    'Your previous response was interrupted. Continue exactly where you stopped. ' +
+    'Do not repeat actions that were already executed.'
+  );
+}
+
 export function assembleSystemPrompt(parts: {
   envBlock: string;
   brainBlock: string;
   indexBlock: string;
   selectedFilesBlock: string;
   modePreamble?: string;
+  strictFormat?: boolean;
 }): string {
   // CONSTITUTION MUST stay first for provider prefix prompt caching.
   const blocks = [
@@ -88,8 +106,12 @@ export function assembleSystemPrompt(parts: {
     parts.indexBlock,
     parts.selectedFilesBlock,
   ];
-  if (parts.modePreamble) {
-    blocks.push(`<mode_instruction>\n${parts.modePreamble}\n</mode_instruction>`);
+  const instructions = [
+    parts.modePreamble,
+    parts.strictFormat ? STRICT_FORMAT_REMINDER : undefined,
+  ].filter(Boolean);
+  if (instructions.length > 0) {
+    blocks.push(`<mode_instruction>\n${instructions.join('\n\n')}\n</mode_instruction>`);
   }
   return blocks.filter(Boolean).join('\n\n');
 }

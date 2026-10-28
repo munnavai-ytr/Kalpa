@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Check, Eye, EyeOff, RefreshCw, Zap } from 'lucide-react';
+import { Eye, EyeOff, RefreshCw } from 'lucide-react';
 import {
   PROVIDER_PRESETS,
   useProviderStore,
@@ -9,36 +9,51 @@ import {
   type FetchedModel,
   type ProviderProfile,
 } from '@/lib/providers/store';
+import { isOpenRouterUrl } from '@/lib/providers/credits';
 import type { ProviderKind } from '@/lib/providers/core';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { useUiStore } from '@/stores/ui';
 import { VaultAndProfilesSection } from './VaultAndProfilesSection';
+import { FallbackProfilesCard } from './FallbackProfilesCard';
+import { ProviderAdvancedFields } from './ProviderAdvancedFields';
 
 export function ProvidersTab() {
   const profiles = useProviderStore((s) => s.profiles);
+  const openRouterCredits = useProviderStore((s) => s.openRouterCredits);
   const upsertProfile = useProviderStore((s) => s.upsertProfile);
+  const patchProfileMeta = useProviderStore((s) => s.patchProfileMeta);
+  const refreshOpenRouterCredit = useProviderStore((s) => s.refreshOpenRouterCredit);
   const fetchModels = useProviderStore((s) => s.fetchModels);
   const testConnection = useProviderStore((s) => s.testConnection);
   const addToast = useUiStore((s) => s.addToast);
 
-  const [editingId, setEditingId] = useState<string | null>(profiles[0]?.id ?? 'new');
-  const [label, setLabel] = useState('OpenAI');
-  const [kind, setKind] = useState<ProviderKind>('openai');
-  const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1');
-  const [apiKey, setApiKey] = useState('');
+  const first = profiles[0];
+  const [editingId, setEditingId] = useState<string | null>(first?.id ?? 'new');
+  const [label, setLabel] = useState(first?.label ?? 'OpenAI');
+  const [kind, setKind] = useState<ProviderKind>(first?.kind ?? 'openai');
+  const [baseUrl, setBaseUrl] = useState(first?.baseUrl ?? 'https://api.openai.com/v1');
+  const [apiKey, setApiKey] = useState(first?.apiKey ?? '');
   const [showKey, setShowKey] = useState(false);
-  const [model, setModel] = useState('');
-  const [maxOutputTokens, setMaxOutputTokens] = useState(8192);
-  const [contextTokens, setContextTokens] = useState(128000);
-  const [tempStr, setTempStr] = useState('');
-  const [useProxy, setUseProxy] = useState(false);
+  const [model, setModel] = useState(first?.model ?? '');
+  const [maxOutputTokens, setMaxOutputTokens] = useState(first?.maxOutputTokens ?? 8192);
+  const [contextTokens, setContextTokens] = useState(first?.contextTokens ?? 128000);
+  const [tempStr, setTempStr] = useState(first?.temperature !== undefined ? String(first.temperature) : '');
+  const [useProxy, setUseProxy] = useState(first?.useProxy ?? false);
+  const [economyMode, setEconomyMode] = useState(Boolean(first?.economyMode));
+  const [strictFormat, setStrictFormat] = useState(Boolean(first?.strictFormat));
+  const [extraBodyStr, setExtraBodyStr] = useState(
+    first?.extraBody ? JSON.stringify(first.extraBody, null, 2) : ''
+  );
 
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [comboOpen, setComboOpen] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
+
+  const editedSaved = profiles.find((p) => p.id === editingId);
+  const creditInfo = editingId ? openRouterCredits[editingId] : undefined;
 
   const loadForEdit = (p: ProviderProfile) => {
     setEditingId(p.id);
@@ -51,6 +66,9 @@ export function ProvidersTab() {
     setContextTokens(p.contextTokens);
     setTempStr(p.temperature !== undefined ? String(p.temperature) : '');
     setUseProxy(p.useProxy);
+    setEconomyMode(Boolean(p.economyMode));
+    setStrictFormat(Boolean(p.strictFormat));
+    setExtraBodyStr(p.extraBody ? JSON.stringify(p.extraBody, null, 2) : '');
     setModels([]);
     setTestResult(null);
   };
@@ -68,8 +86,30 @@ export function ProvidersTab() {
     setContextTokens(128000);
     setTempStr('');
     setUseProxy(false);
+    setEconomyMode(false);
+    setStrictFormat(false);
+    setExtraBodyStr('');
     setModels([]);
     setTestResult(null);
+  };
+
+  const parseExtraBodyJson = (): Record<string, unknown> | undefined | null => {
+    if (!extraBodyStr.trim()) return undefined;
+    try {
+      const parsed = JSON.parse(extraBodyStr);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        addToast({ title: 'Extra JSON body must be a JSON object {...}', kind: 'error' });
+        return null;
+      }
+      return parsed as Record<string, unknown>;
+    } catch (err) {
+      addToast({
+        title: 'Invalid Extra JSON body',
+        description: err instanceof Error ? err.message : String(err),
+        kind: 'error',
+      });
+      return null;
+    }
   };
 
   const handleFetchModels = async () => {
@@ -94,18 +134,13 @@ export function ProvidersTab() {
     }
   };
 
-  const selectFetchedModel = (m: FetchedModel) => {
-    setModel(m.id);
-    if (m.inputTokens) setContextTokens(m.inputTokens);
-    if (m.outputTokens) setMaxOutputTokens(m.outputTokens);
-    setComboOpen(false);
-  };
-
   const runTest = async (overrideProxy?: boolean) => {
     if (!model.trim()) {
       addToast({ title: 'Enter or select a model ID before testing', kind: 'warn' });
       return;
     }
+    const extraBody = parseExtraBodyJson();
+    if (extraBody === null) return;
     setTesting(true);
     setTestResult(null);
     const proxyFlag = overrideProxy ?? useProxy;
@@ -119,6 +154,7 @@ export function ProvidersTab() {
       maxOutputTokens,
       temperature: Number.isFinite(parsedTemp) ? parsedTemp : undefined,
       useProxy: proxyFlag,
+      extraBody,
     });
     setTestResult(res);
     setTesting(false);
@@ -130,6 +166,8 @@ export function ProvidersTab() {
       addToast({ title: 'Model ID is required', kind: 'warn' });
       return;
     }
+    const extraBody = parseExtraBodyJson();
+    if (extraBody === null) return;
     const parsedTemp = tempStr.trim() === '' ? undefined : Number(tempStr);
     const saved = await upsertProfile({
       id: editingId && editingId !== 'new' ? editingId : undefined,
@@ -142,21 +180,20 @@ export function ProvidersTab() {
       contextTokens,
       temperature: Number.isFinite(parsedTemp) ? parsedTemp : undefined,
       useProxy,
+      economyMode,
+      strictFormat,
+      extraBody,
     });
     setEditingId(saved.id);
     addToast({ title: `Saved ${saved.label}`, kind: 'success' });
   };
 
-  const filteredModels = models.filter((m) =>
-    m.id.toLowerCase().includes(model.toLowerCase())
-  );
+  const filteredModels = models.filter((m) => m.id.toLowerCase().includes(model.toLowerCase()));
 
   return (
     <div className="space-y-6">
-      <VaultAndProfilesSection
-        onNewProfile={() => applyPreset('openai')}
-        onEditProfile={loadForEdit}
-      />
+      <VaultAndProfilesSection onNewProfile={() => applyPreset('openai')} onEditProfile={loadForEdit} />
+      <FallbackProfilesCard />
 
       <Card>
         <form onSubmit={handleSave} className="space-y-4">
@@ -170,13 +207,9 @@ export function ProvidersTab() {
               defaultValue=""
               className="min-h-[38px] px-3 rounded-[10px] bg-kalpa-surface border border-kalpa-border text-xs text-kalpa-text"
             >
-              <option value="" disabled>
-                Load preset…
-              </option>
+              <option value="" disabled>Load preset…</option>
               {PROVIDER_PRESETS.map((pr) => (
-                <option key={pr.id} value={pr.id}>
-                  {pr.label}
-                </option>
+                <option key={pr.id} value={pr.id}>{pr.label}</option>
               ))}
             </select>
           </div>
@@ -216,7 +249,20 @@ export function ProvidersTab() {
           </div>
 
           <div>
-            <label className="block text-xs text-kalpa-muted mb-1">API Key</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs text-kalpa-muted">API Key</label>
+              {editedSaved && isOpenRouterUrl(baseUrl) ? (
+                <button
+                  type="button"
+                  onClick={() => void refreshOpenRouterCredit(editedSaved.id)}
+                  className="text-[11px] font-mono text-kalpa-gold hover:underline cursor-pointer"
+                >
+                  {creditInfo?.limitRemaining !== null && creditInfo?.limitRemaining !== undefined
+                    ? `Credit left: $${creditInfo.limitRemaining.toFixed(3)} · Refresh`
+                    : 'Check OpenRouter credit'}
+                </button>
+              ) : null}
+            </div>
             <div className="flex gap-2">
               <div className="relative flex-1">
                 <input
@@ -270,7 +316,12 @@ export function ProvidersTab() {
                   <button
                     key={m.id}
                     type="button"
-                    onMouseDown={() => selectFetchedModel(m)}
+                    onMouseDown={() => {
+                      setModel(m.id);
+                      if (m.inputTokens) setContextTokens(m.inputTokens);
+                      if (m.outputTokens) setMaxOutputTokens(Math.min(m.outputTokens, 8192));
+                      setComboOpen(false);
+                    }}
                     className="w-full flex items-center justify-between px-3 py-2 text-left text-xs font-mono text-kalpa-text hover:bg-kalpa-surface rounded-[8px] cursor-pointer"
                   >
                     <span className="truncate">{m.id}</span>
@@ -285,91 +336,31 @@ export function ProvidersTab() {
             ) : null}
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs text-kalpa-muted mb-1">Max Output</label>
-              <input
-                type="number"
-                value={maxOutputTokens}
-                onChange={(e) => setMaxOutputTokens(Number(e.target.value) || 8192)}
-                className="w-full min-h-[44px] px-3 rounded-[10px] bg-kalpa-surface border border-kalpa-border text-sm font-mono tabular-nums text-kalpa-text"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-kalpa-muted mb-1">Context Window</label>
-              <input
-                type="number"
-                value={contextTokens}
-                onChange={(e) => setContextTokens(Number(e.target.value) || 128000)}
-                className="w-full min-h-[44px] px-3 rounded-[10px] bg-kalpa-surface border border-kalpa-border text-sm font-mono tabular-nums text-kalpa-text"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-kalpa-muted mb-1">Temp (opt)</label>
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                max="2"
-                value={tempStr}
-                onChange={(e) => setTempStr(e.target.value)}
-                placeholder="Auto"
-                className="w-full min-h-[44px] px-3 rounded-[10px] bg-kalpa-surface border border-kalpa-border text-sm font-mono tabular-nums text-kalpa-text"
-              />
-            </div>
-          </div>
-
-          <label className="flex items-center gap-2.5 text-xs text-kalpa-text cursor-pointer select-none min-h-[36px]">
-            <input
-              type="checkbox"
-              checked={useProxy}
-              onChange={(e) => setUseProxy(e.target.checked)}
-              className="w-4 h-4 accent-kalpa-violet"
-            />
-            Use stateless edge proxy (<code className="font-mono">/api/proxy</code>) for CORS-restricted hosts
-          </label>
-
-          {testResult ? (
-            <div
-              className={`p-3.5 rounded-[12px] border text-xs space-y-1.5 ${
-                testResult.ok
-                  ? 'border-kalpa-success/40 bg-kalpa-success/10 text-kalpa-text'
-                  : 'border-kalpa-danger/40 bg-kalpa-danger/10 text-kalpa-text'
-              }`}
-            >
-              {testResult.ok ? (
-                <p className="font-mono tabular-nums">
-                  PASS · First token: {testResult.ttftMs} ms · Total: {testResult.totalMs} ms · Reply: &ldquo;{testResult.reply}&rdquo;
-                </p>
-              ) : (
-                <>
-                  <p className="text-kalpa-danger font-medium">
-                    Connection failed ({testResult.totalMs} ms): {testResult.error}
-                  </p>
-                  {testResult.suggestProxy ? (
-                    <Button size="sm" variant="secondary" onClick={() => runTest(true)}>
-                      Enable Use proxy &amp; retry
-                    </Button>
-                  ) : null}
-                </>
-              )}
-            </div>
-          ) : null}
-
-          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-            <Button
-              type="button"
-              variant="secondary"
-              loading={testing}
-              leftIcon={<Zap className="w-4 h-4" />}
-              onClick={() => runTest()}
-            >
-              Test connection
-            </Button>
-            <Button type="submit" variant="primary" leftIcon={<Check className="w-4 h-4" />}>
-              Save Profile
-            </Button>
-          </div>
+          <ProviderAdvancedFields
+            editedSaved={editedSaved}
+            maxOutputTokens={maxOutputTokens}
+            onChangeMaxOutput={setMaxOutputTokens}
+            contextTokens={contextTokens}
+            onChangeContextTokens={setContextTokens}
+            tempStr={tempStr}
+            onChangeTempStr={setTempStr}
+            useProxy={useProxy}
+            onChangeUseProxy={setUseProxy}
+            economyMode={economyMode}
+            onChangeEconomyMode={setEconomyMode}
+            strictFormat={strictFormat}
+            onChangeStrictFormat={setStrictFormat}
+            extraBodyStr={extraBodyStr}
+            onChangeExtraBodyStr={setExtraBodyStr}
+            onResetEffectiveMaxOutput={() => {
+              if (editedSaved) {
+                void patchProfileMeta(editedSaved.id, { effectiveMaxOutput: undefined });
+              }
+            }}
+            testing={testing}
+            testResult={testResult}
+            onRunTest={(overrideProxy) => void runTest(overrideProxy)}
+          />
         </form>
       </Card>
     </div>

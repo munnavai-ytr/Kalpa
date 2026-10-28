@@ -18,13 +18,19 @@ import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { Button } from '@/components/ui/Button';
 
-function SandpackBridge({ projectId }: { projectId: string }) {
+interface SandpackBridgeProps {
+  projectId: string;
+  bundle: SandpackBundleSpec;
+}
+
+function SandpackBridge({ projectId, bundle }: SandpackBridgeProps) {
   const { breakpoint } = useBreakpoint();
   const { sandpack, listen } = useSandpack();
   const { logs } = useSandpackConsole({ resetOnPreviewRestart: true });
 
   const setStatus = usePreviewStore((s) => s.setStatus);
   const pushEntry = usePreviewStore((s) => s.pushEntry);
+  const markPreviewReady = usePreviewStore((s) => s.markPreviewReady);
   const openFile = useProjectStore((s) => s.openFile);
   const sendUserMessage = useChatStore((s) => s.sendUserMessage);
   const setComposerDraft = useChatStore((s) => s.setComposerDraft);
@@ -33,12 +39,43 @@ function SandpackBridge({ projectId }: { projectId: string }) {
   const addToast = useUiStore((s) => s.addToast);
 
   const seenLogCountRef = useRef(0);
+  const expectedHashRef = useRef(bundle.expectedFilesHash);
+  const prevFilesRef = useRef<Record<string, string>>(bundle.files);
+  const isFirstMountRef = useRef(true);
+
+  useEffect(() => {
+    expectedHashRef.current = bundle.expectedFilesHash;
+  }, [bundle.expectedFilesHash]);
+
+  // C5: Debounced content-only updates without remounting SandpackProvider
+  useEffect(() => {
+    if (isFirstMountRef.current) {
+      isFirstMountRef.current = false;
+      prevFilesRef.current = bundle.files;
+      return;
+    }
+
+    const changed: Record<string, string> = {};
+    for (const [k, v] of Object.entries(bundle.files)) {
+      if (prevFilesRef.current[k] !== v) {
+        changed[k] = v;
+      }
+    }
+    prevFilesRef.current = bundle.files;
+    if (Object.keys(changed).length === 0) return;
+
+    setStatus('building');
+    const timer = setTimeout(() => {
+      sandpack.updateFile(changed);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [bundle.files, sandpack, setStatus]);
 
   useEffect(() => {
     setStatus('building');
     const unsub = listen((msg: any) => {
       if (msg.type === 'done' && !msg.compilatonError) {
-        setStatus('ready');
+        markPreviewReady(expectedHashRef.current);
       } else if (msg.type === 'action' && msg.action === 'show-error') {
         const title = msg.title ? `${msg.title}: ` : '';
         const text = `${title}${msg.message || 'Bundler error'}`;
@@ -52,7 +89,7 @@ function SandpackBridge({ projectId }: { projectId: string }) {
       }
     });
     return () => unsub();
-  }, [listen, pushEntry, setStatus]);
+  }, [listen, markPreviewReady, pushEntry, setStatus]);
 
   useEffect(() => {
     if (logs.length < seenLogCountRef.current) {
@@ -151,12 +188,12 @@ export function SandpackStage({ projectId, reloadNonce, bundle }: SandpackStageP
   return (
     <div className="relative h-full w-full overflow-hidden">
       <SandpackProvider
-        key={`${projectId}-${bundle.template}-${reloadNonce}`}
+        key={`${projectId}-${bundle.structuralHash}-${reloadNonce}`}
         template={bundle.template}
         files={bundle.files}
         options={{
           recompileMode: 'delayed',
-          recompileDelay: 500,
+          recompileDelay: 350,
           autorun: true,
         }}
         style={{ height: '100%', width: '100%' }}
@@ -167,7 +204,7 @@ export function SandpackStage({ projectId, reloadNonce, bundle }: SandpackStageP
           showOpenInCodeSandbox={false}
           style={{ height: '100%', width: '100%' }}
         />
-        <SandpackBridge projectId={projectId} />
+        <SandpackBridge projectId={projectId} bundle={bundle} />
       </SandpackProvider>
     </div>
   );

@@ -8,7 +8,6 @@ import {
   Cloud,
   Cpu,
   History,
-  KeyRound,
   MoreHorizontal,
   Settings,
   Share,
@@ -22,9 +21,9 @@ import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { Logo } from '@/components/brand/Logo';
 import { EngineSwitch } from '@/components/agent/EngineSwitch';
-import { Chip } from '@/components/ui/Chip';
 import { IconButton } from '@/components/ui/IconButton';
 import { Tabs } from '@/components/ui/Tabs';
+import { ModelChip } from './ModelChip';
 
 export interface TopBarProps {
   onOpenModelSheet: () => void;
@@ -35,11 +34,7 @@ export function TopBar({ onOpenModelSheet }: TopBarProps) {
   const currentProject = useProjectStore((s) => s.currentProject);
   const renameProject = useProjectStore((s) => s.renameProject);
 
-  const profiles = useProviderStore((s) => s.profiles);
-  const activeProfileId = useProviderStore((s) => s.activeProfileId);
   const e2bApiKey = useProviderStore((s) => s.e2bApiKey);
-  const activeProfile =
-    profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null;
 
   const setBrainOpen = useBrainStore((s) => s.setBrainOpen);
   const setHistoryOpen = useBrainStore((s) => s.setHistoryOpen);
@@ -88,7 +83,6 @@ export function TopBar({ onOpenModelSheet }: TopBarProps) {
 
   return (
     <header className="h-13 border-b border-kalpa-border bg-kalpa-bg-2 px-2.5 sm:px-4 flex items-center justify-between gap-2 shrink-0 pt-safe z-30">
-      {/* Left: Brand + Editable Project Name */}
       <div className="flex items-center gap-2 min-w-0">
         <Link href="/" aria-label="Back to Kalpa Home" className="shrink-0">
           <Logo showWordmark={breakpoint === 'desktop'} size="sm" />
@@ -125,7 +119,6 @@ export function TopBar({ onOpenModelSheet }: TopBarProps) {
         )}
       </div>
 
-      {/* Center (Tablet only): Segmented Preview | Code switch */}
       {breakpoint === 'tablet' ? (
         <div className="flex items-center gap-1.5">
           <Tabs
@@ -147,19 +140,9 @@ export function TopBar({ onOpenModelSheet }: TopBarProps) {
         </div>
       ) : null}
 
-      {/* Right: Engine, Model, Brain, History, Export, Settings */}
       {breakpoint === 'phone' ? (
         <div className="relative flex items-center gap-1 shrink-0">
-          <Chip
-            onClick={onOpenModelSheet}
-            active={Boolean(activeProfile)}
-            icon={<KeyRound className="w-3 h-3" />}
-            className="max-w-[116px]"
-          >
-            <span className="truncate">
-              {activeProfile ? activeProfile.model : 'Add key'}
-            </span>
-          </Chip>
+          <ModelChip onClick={onOpenModelSheet} compact className="max-w-[138px]" />
 
           <IconButton
             label="Project Brain"
@@ -252,18 +235,7 @@ export function TopBar({ onOpenModelSheet }: TopBarProps) {
         <div className="flex items-center gap-1.5 shrink-0">
           <EngineSwitch />
 
-          <Chip
-            onClick={onOpenModelSheet}
-            active={Boolean(activeProfile)}
-            icon={<KeyRound className="w-3.5 h-3.5" />}
-            className="max-w-[190px]"
-          >
-            <span className="truncate">
-              {activeProfile
-                ? `${activeProfile.label} · ${activeProfile.model}`
-                : 'Add key'}
-            </span>
-          </Chip>
+          <ModelChip onClick={onOpenModelSheet} className="max-w-[260px]" />
 
           <IconButton
             label="Project Brain (.kalpa)"

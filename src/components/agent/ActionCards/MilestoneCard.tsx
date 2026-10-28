@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { CheckCircle2, Play } from 'lucide-react';
+import { CheckCircle2, Info, Play } from 'lucide-react';
 import type { Action } from '@/lib/agent/actions';
 import { parseMilestonesFromTasks } from '@/lib/brain/files';
 import { useAgentStore } from '@/stores/agent';
@@ -12,9 +12,10 @@ import { Button } from '@/components/ui/Button';
 
 export interface MilestoneCardProps {
   action: Extract<Action, { type: 'complete' | 'finished' }>;
+  filesChangedCount?: number;
 }
 
-export function MilestoneCard({ action }: MilestoneCardProps) {
+export function MilestoneCard({ action, filesChangedCount }: MilestoneCardProps) {
   const currentProject = useProjectStore((s) => s.currentProject);
   const isRunning = useAgentStore((s) => s.isRunning);
   const autoContinue = useAgentStore((s) => s.prefs.autoContinue);
@@ -22,6 +23,23 @@ export function MilestoneCard({ action }: MilestoneCardProps) {
   const sendUserMessage = useChatStore((s) => s.sendUserMessage);
 
   const parsed = React.useMemo(() => parseMilestonesFromTasks(tasksMd), [tasksMd]);
+
+  // B5: Never render a green success card when 0 files were changed in the turn
+  if (filesChangedCount === 0) {
+    return (
+      <div className="rounded-[10px] border border-kalpa-border bg-kalpa-surface/70 px-3 py-2 flex items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2 text-kalpa-muted font-mono">
+          <Info className="w-3.5 h-3.5 shrink-0" />
+          <span>0 files changed</span>
+        </div>
+        {parsed.total > 0 ? (
+          <span className="font-mono text-[11px] text-kalpa-subtle">
+            {parsed.completed}/{parsed.total} milestones
+          </span>
+        ) : null}
+      </div>
+    );
+  }
 
   if (action.type === 'finished') {
     return (

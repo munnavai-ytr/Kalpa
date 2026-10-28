@@ -282,6 +282,10 @@ export async function executeIterationActions(
       item.outcome = { ok: true, summary: `Answered: ${answer}` };
       iterResults.push(`<result type="question" answer="${answer.replace(/"/g, '&quot;')}">${answer}</result>`);
     } else if (action.type === 'complete') {
+      if ((mode === 'NEW_PROJECT' || mode === 'CONTINUE') && !modifiedCode && touchedPathsInTurn.size === 0) {
+        item.outcome = { ok: false, summary: 'Skipped: 0 source files written yet' };
+        continue;
+      }
       const mId = action.milestone || 'milestone';
       if (action.milestone) await markMilestoneCompleted(projectId, action.milestone);
       await useBrainStore.getState().refreshBrainFromVfs(projectId);
@@ -290,6 +294,10 @@ export async function executeIterationActions(
       item.outcome = { ok: true, summary: `Milestone ${mId} complete` };
       ignoreRemaining = true;
     } else if (action.type === 'finished') {
+      if ((mode === 'NEW_PROJECT' || mode === 'CONTINUE') && !modifiedCode && touchedPathsInTurn.size === 0) {
+        item.outcome = { ok: false, summary: 'Skipped: 0 source files written yet' };
+        continue;
+      }
       sawFinished = true;
       item.outcome = { ok: true, summary: 'Done' };
       ignoreRemaining = true;

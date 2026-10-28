@@ -1,8 +1,9 @@
 import { applyMemoryAction, readAllBrainMemory } from '@/lib/brain/files';
 import { MEMORY_MAX_CHARS } from '@/lib/brain/caps';
-import { streamChat, type ProviderConfig } from '@/lib/providers/core';
+import type { ProviderProfile } from '@/lib/providers/store';
 import type { ChatRecord } from '@/lib/vfs/db';
 import { compactAssistantMessage, compactResultUserMessage } from './compact';
+import { streamWithRecovery } from './recovery';
 
 export const SUMMARY_INSTRUCTION =
   'SUMMARY: Summarise the conversation below in <= 12 bullet points: user goals, decisions, files changed, unresolved questions. Plain markdown only.';
@@ -12,7 +13,7 @@ export const SUMMARY_INSTRUCTION =
  */
 export async function updateRollingSummary(
   projectId: string,
-  profile: ProviderConfig,
+  profile: ProviderProfile,
   olderMessages: ChatRecord[],
   signal?: AbortSignal
 ): Promise<boolean> {
@@ -30,12 +31,12 @@ export async function updateRollingSummary(
     .slice(-18000);
 
   let generated = '';
-  const summaryCfg: ProviderConfig = {
+  const summaryCfg: ProviderProfile = {
     ...profile,
     maxOutputTokens: Math.min(profile.maxOutputTokens || 1024, 1024),
   };
 
-  for await (const ev of streamChat(
+  for await (const ev of streamWithRecovery(
     summaryCfg,
     [
       {
@@ -43,7 +44,7 @@ export async function updateRollingSummary(
         content: `${SUMMARY_INSTRUCTION}\n\n${transcript}`,
       },
     ],
-    signal
+    { signal }
   )) {
     if (ev.delta) generated += ev.delta;
   }

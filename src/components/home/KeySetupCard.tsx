@@ -231,7 +231,7 @@ export function KeySetupCard({ onSaved, compact = false }: KeySetupCardProps) {
                 onMouseDown={() => {
                   setModel(m.id);
                   if (m.inputTokens) setContextTokens(m.inputTokens);
-                  if (m.outputTokens) setMaxOutputTokens(m.outputTokens);
+                  if (m.outputTokens) setMaxOutputTokens(Math.min(m.outputTokens, 8192));
                   setComboOpen(false);
                 }}
                 className="w-full flex items-center justify-between px-3 py-2 text-left text-xs font-mono text-kalpa-text hover:bg-kalpa-surface rounded-[8px] cursor-pointer"

@@ -1,4 +1,6 @@
 // ===== Kalpa provider layer (BYOK). Direct browser calls. =====
+import { deepMerge } from '@/lib/agent/reliability';
+
 export type Role = 'system' | 'user' | 'assistant';
 export interface ChatMessage { role: Role; content: string }
 export type ProviderKind = 'openai' | 'anthropic' | 'gemini';
@@ -10,8 +12,24 @@ export interface ProviderConfig {
   maxOutputTokens: number;
   temperature?: number;       // omitted when undefined (reasoning models reject it)
   useProxy?: boolean;         // route through /api/proxy for CORS-blocked hosts
+  extraBody?: Record<string, unknown>;
 }
 export interface StreamEvent { delta?: string; usage?: { input?: number; output?: number }; done?: boolean }
+
+export class ProviderHttpError extends Error {
+  status: number;
+  statusText: string;
+  body: string;
+  retryAfter: string | null;
+  constructor(status: number, statusText: string, body: string, retryAfter: string | null = null) {
+    super(`${status} ${statusText}${body ? ' — ' + body.slice(0, 400) : ''}`);
+    this.name = 'ProviderHttpError';
+    this.status = status;
+    this.statusText = statusText;
+    this.body = body;
+    this.retryAfter = retryAfter;
+  }
+}
 
 /** Build the fetch() request for a provider. Pure function (easy to test). */
 export function buildRequest(cfg: ProviderConfig, messages: ChatMessage[]): { url: string; init: RequestInit } {
@@ -19,6 +37,12 @@ export function buildRequest(cfg: ProviderConfig, messages: ChatMessage[]): { ur
   const rest = messages.filter(m => m.role !== 'system');
   const base = cfg.baseUrl.replace(/\/+$/, '');
   if (cfg.kind === 'anthropic') {
+    const bodyObj = deepMerge({
+      model: cfg.model, max_tokens: cfg.maxOutputTokens, stream: true,
+      ...(systemText ? { system: systemText } : {}),
+      ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {}),
+      messages: rest.map(m => ({ role: m.role, content: m.content })),
+    }, cfg.extraBody);
     return {
       url: `${base}/v1/messages`,
       init: {
@@ -29,42 +53,39 @@ export function buildRequest(cfg: ProviderConfig, messages: ChatMessage[]): { ur
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
         },
-        body: JSON.stringify({
-          model: cfg.model, max_tokens: cfg.maxOutputTokens, stream: true,
-          ...(systemText ? { system: systemText } : {}),
-          ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {}),
-          messages: rest.map(m => ({ role: m.role, content: m.content })),
-        }),
+        body: JSON.stringify(bodyObj),
       },
     };
   }
   if (cfg.kind === 'gemini') {
+    const bodyObj = deepMerge({
+      ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
+      contents: rest.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+      generationConfig: { maxOutputTokens: cfg.maxOutputTokens, ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {}) },
+    }, cfg.extraBody);
     return {
       url: `${base}/v1beta/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse`,
       init: {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-goog-api-key': cfg.apiKey },
-        body: JSON.stringify({
-          ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
-          contents: rest.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
-          generationConfig: { maxOutputTokens: cfg.maxOutputTokens, ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {}) },
-        }),
+        body: JSON.stringify(bodyObj),
       },
     };
   }
   // OpenAI-compatible (OpenAI, OpenRouter, Groq, DeepSeek, Together, Mistral, xAI, LM Studio, Ollama...)
   const isOpenAI = /api\.openai\.com/.test(base);
+  const bodyObj = deepMerge({
+    model: cfg.model, stream: true, stream_options: { include_usage: true },
+    [isOpenAI ? 'max_completion_tokens' : 'max_tokens']: cfg.maxOutputTokens,
+    ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {}),
+    messages,
+  }, cfg.extraBody);
   return {
     url: `${base}/chat/completions`,
     init: {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({
-        model: cfg.model, stream: true, stream_options: { include_usage: true },
-        [isOpenAI ? 'max_completion_tokens' : 'max_tokens']: cfg.maxOutputTokens,
-        ...(cfg.temperature !== undefined ? { temperature: cfg.temperature } : {}),
-        messages,
-      }),
+      body: JSON.stringify(bodyObj),
     },
   };
 }
@@ -114,15 +135,15 @@ export async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator
   } finally { reader.releaseLock(); }
 }
 
-/** Stream a chat completion. Throws Error with a human-readable message on HTTP errors. */
+/** Stream a chat completion. Throws ProviderHttpError on HTTP errors. */
 export async function* streamChat(cfg: ProviderConfig, messages: ChatMessage[], signal?: AbortSignal): AsyncGenerator<StreamEvent> {
   const { url, init } = buildRequest(cfg, messages);
   const res = cfg.useProxy
     ? await fetch('/api/proxy', { method: 'POST', signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url, method: init.method, headers: init.headers, body: init.body }) })
     : await fetch(url, { ...init, signal });
   if (!res.ok || !res.body) {
-    let detail = ''; try { detail = (await res.text()).slice(0, 400); } catch { /* ignore */ }
-    throw new Error(`${res.status} ${res.statusText}${detail ? ' — ' + detail : ''}`);
+    let detail = ''; try { detail = (await res.text()).slice(0, 1200); } catch { /* ignore */ }
+    throw new ProviderHttpError(res.status, res.statusText, detail, res.headers.get('retry-after'));
   }
   for await (const data of sseData(res.body)) {
     if (data === '[DONE]') { yield { done: true }; return; }

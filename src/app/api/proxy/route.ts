@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 const ALLOWED_HOSTS = new Set([
   'api.openai.com',
@@ -24,6 +25,56 @@ const STRIPPED_HEADERS = new Set([
 ]);
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
+const PING_INTERVAL_MS = 10_000;
+const INITIAL_HEADER_RACE_MS = 9_500;
+
+function pipeWithSseKeepalive(
+  upstreamBody: ReadableStream<Uint8Array>
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const reader = upstreamBody.getReader();
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let lastByteAt = Date.now();
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      pingTimer = setInterval(() => {
+        if (Date.now() - lastByteAt >= PING_INTERVAL_MS - 500) {
+          try {
+            controller.enqueue(encoder.encode(': ping\n\n'));
+            lastByteAt = Date.now();
+          } catch {
+            if (pingTimer) clearInterval(pingTimer);
+          }
+        }
+      }, PING_INTERVAL_MS);
+    },
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read();
+        if (done) {
+          if (pingTimer) clearInterval(pingTimer);
+          reader.releaseLock();
+          controller.close();
+          return;
+        }
+        if (value && value.byteLength > 0) {
+          lastByteAt = Date.now();
+          controller.enqueue(value);
+        }
+      } catch (err) {
+        if (pingTimer) clearInterval(pingTimer);
+        reader.releaseLock();
+        controller.error(err);
+      }
+    },
+    cancel(reason) {
+      if (pingTimer) clearInterval(pingTimer);
+      reader.releaseLock();
+      return upstreamBody.cancel(reason);
+    },
+  });
+}
 
 export async function POST(req: NextRequest): Promise<Response> {
   const declaredLen = Number(req.headers.get('content-length') || '0');
@@ -92,24 +143,125 @@ export async function POST(req: NextRequest): Promise<Response> {
           ? JSON.stringify(payload.body)
           : undefined;
 
-  try {
-    const upstream = await fetch(parsedUrl.toString(), {
-      method,
-      headers: forwardHeaders,
-      body: upstreamBody,
-    });
+  const isLikelyStream =
+    method === 'POST' &&
+    (parsedUrl.searchParams.get('alt') === 'sse' ||
+      (typeof upstreamBody === 'string' && upstreamBody.includes('"stream":true')));
 
+  const upstreamPromise = fetch(parsedUrl.toString(), {
+    method,
+    headers: forwardHeaders,
+    body: upstreamBody,
+  });
+
+  if (!isLikelyStream) {
+    try {
+      const upstream = await upstreamPromise;
+      const resHeaders = new Headers();
+      const ct = upstream.headers.get('content-type');
+      if (ct) resHeaders.set('content-type', ct);
+      resHeaders.set('cache-control', 'no-store');
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: resHeaders,
+      });
+    } catch {
+      return new Response('Upstream request failed', { status: 502 });
+    }
+  }
+
+  // Race initial upstream headers against 9.5s so fast HTTP errors (401/402/429) preserve status code,
+  // while slow reasoning cold-starts immediately flush SSE ': ping\n\n' keepalive bytes.
+  const raceResult = await Promise.race([
+    upstreamPromise.then((res) => ({ kind: 'ready' as const, res })),
+    new Promise<{ kind: 'slow' }>((resolve) =>
+      setTimeout(() => resolve({ kind: 'slow' }), INITIAL_HEADER_RACE_MS)
+    ),
+  ]).catch(() => ({ kind: 'failed' as const }));
+
+  if (raceResult.kind === 'failed') {
+    return new Response('Upstream request failed', { status: 502 });
+  }
+
+  if (raceResult.kind === 'ready') {
+    const upstream = raceResult.res;
     const resHeaders = new Headers();
-    const contentType = upstream.headers.get('content-type');
-    if (contentType) resHeaders.set('content-type', contentType);
+    const ct = upstream.headers.get('content-type');
+    if (ct) resHeaders.set('content-type', ct);
     resHeaders.set('cache-control', 'no-store');
 
-    return new Response(upstream.body, {
+    if (!upstream.ok || !upstream.body || !(ct || '').includes('text/event-stream')) {
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: resHeaders,
+      });
+    }
+
+    return new Response(pipeWithSseKeepalive(upstream.body), {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: resHeaders,
     });
-  } catch {
-    return new Response('Upstream request failed', { status: 502 });
   }
+
+  // Slow cold-start (>9.5s before headers): stream SSE ': ping\n\n' while waiting for upstream
+  const encoder = new TextEncoder();
+  const slowStream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(encoder.encode(': ping\n\n'));
+      const timer = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(': ping\n\n'));
+        } catch {
+          clearInterval(timer);
+        }
+      }, PING_INTERVAL_MS);
+
+      try {
+        const upstream = await upstreamPromise;
+        if (!upstream.ok || !upstream.body) {
+          let errBody = '';
+          try {
+            errBody = await upstream.text();
+          } catch {
+            // ignore
+          }
+          clearInterval(timer);
+          const errPayload = JSON.stringify({
+            error: { code: upstream.status, message: errBody || upstream.statusText },
+          });
+          controller.enqueue(encoder.encode(`data: ${errPayload}\n\n`));
+          controller.close();
+          return;
+        }
+
+        const reader = upstream.body.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) controller.enqueue(value);
+        }
+        reader.releaseLock();
+        clearInterval(timer);
+        controller.close();
+      } catch {
+        clearInterval(timer);
+        const errPayload = JSON.stringify({
+          error: { code: 502, message: 'Upstream stream connection failed' },
+        });
+        controller.enqueue(encoder.encode(`data: ${errPayload}\n\n`));
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(slowStream, {
+    status: 200,
+    headers: {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  });
 }

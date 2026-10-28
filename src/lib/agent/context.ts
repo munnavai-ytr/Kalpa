@@ -14,16 +14,21 @@ import { isBrainPath } from '@/lib/brain/caps';
 import { readAllBrainMemory } from '@/lib/brain/files';
 import { fileIndexBlock, readOrBuildBrainIndex } from '@/lib/brain/index';
 import { brainPack } from '@/lib/brain/pack';
-import type { ChatMessage, ProviderConfig } from '@/lib/providers/core';
-import type { ChatRecord, EngineKind } from '@/lib/vfs/db';
+import type { ChatMessage } from '@/lib/providers/core';
+import type { ProviderProfile } from '@/lib/providers/store';
+import type { ChatRecord, EngineKind, StackKind } from '@/lib/vfs/db';
 import { vfs } from '@/lib/vfs/vfs';
 
 export interface BuildAgentContextOptions {
   projectId: string;
   engine: EngineKind;
+  preferredStack?: StackKind;
   mode: AgentMode;
   latestUserText: string;
-  profile: ProviderConfig & { contextTokens: number };
+  profile: ProviderProfile;
+  economyMode?: boolean;
+  selectedFilesScale?: number;
+  forceDropOlderHistory?: boolean;
   openEditorFiles: string[];
   recentTouchedPaths: string[];
   chatHistory: ChatRecord[];
@@ -116,7 +121,11 @@ function buildSelectedFilesSection(
 export async function buildAgentMessages(
   opts: BuildAgentContextOptions
 ): Promise<ChatMessage[]> {
-  const alloc = computeContextAllocation(opts.profile.contextTokens, opts.profile.maxOutputTokens);
+  const economyActive = Boolean(opts.economyMode || opts.profile.economyMode);
+  const effectiveMaxOut = economyActive
+    ? Math.min(opts.profile.effectiveMaxOutput ?? opts.profile.maxOutputTokens, 4096)
+    : (opts.profile.effectiveMaxOutput ?? opts.profile.maxOutputTokens);
+  const alloc = computeContextAllocation(opts.profile.contextTokens, effectiveMaxOut);
 
   const [rawSnap, memoryInitial, index] = await Promise.all([
     vfs.snapshot(opts.projectId),
@@ -131,7 +140,6 @@ export async function buildAgentMessages(
     }
   }
 
-  // Filter valid conversation history
   let validHistory = opts.chatHistory.filter(
     (m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim().length > 0
   );
@@ -143,7 +151,9 @@ export async function buildAgentMessages(
   }
 
   const recentSix = validHistory.slice(-6);
-  let olderRecords = validHistory.slice(0, Math.max(0, validHistory.length - 6));
+  let olderRecords = opts.forceDropOlderHistory
+    ? []
+    : validHistory.slice(0, Math.max(0, validHistory.length - 6));
 
   let olderChatMsgs: ChatMessage[] = olderRecords.map((m) => ({
     role: m.role,
@@ -157,17 +167,22 @@ export async function buildAgentMessages(
   const olderTokens = olderChatMsgs.reduce((acc, m) => acc + estimateTokens(m.content), 0);
 
   if (olderRecords.length >= 4 && olderTokens > alloc.conversationBudget) {
-    try {
-      const ok = await updateRollingSummary(opts.projectId, opts.profile, olderRecords, opts.signal);
-      if (ok) {
-        const lastOld = olderRecords[olderRecords.length - 1];
-        if (lastOld) opts.onSummarisedUpTo?.(lastOld.id);
-        olderRecords = [];
-        olderChatMsgs = [];
-        memory = await readAllBrainMemory(opts.projectId);
+    if (economyActive) {
+      // A9: In economy mode, skip the extra LLM summary call and trim older messages directly
+      olderChatMsgs = olderChatMsgs.slice(-2);
+    } else {
+      try {
+        const ok = await updateRollingSummary(opts.projectId, opts.profile, olderRecords, opts.signal);
+        if (ok) {
+          const lastOld = olderRecords[olderRecords.length - 1];
+          if (lastOld) opts.onSummarisedUpTo?.(lastOld.id);
+          olderRecords = [];
+          olderChatMsgs = [];
+          memory = await readAllBrainMemory(opts.projectId);
+        }
+      } catch {
+        // Fall back to trimming older messages below
       }
-    } catch {
-      // If rolling summary call fails, fall back to trimming older messages below
     }
   }
 
@@ -180,6 +195,7 @@ export async function buildAgentMessages(
     engine: opts.engine,
     userText: opts.latestUserText,
     mode: opts.mode,
+    preferredStack: opts.preferredStack,
   });
   const modePreamble =
     opts.mode === 'NEW_PROJECT'
@@ -187,13 +203,15 @@ export async function buildAgentMessages(
       : opts.mode === 'PLAN'
         ? PLAN_ONLY_PREAMBLE
         : undefined;
+  const strictFormat = Boolean(opts.profile.strictFormat);
   const indexBlock = fileIndexBlock(index, alloc.indexBudget);
 
+  const fileScale = (economyActive ? 0.6 : 1) * (opts.selectedFilesScale ?? 1);
   let selectedFilesBlock = buildSelectedFilesSection(codeSnap, {
     openEditorFiles: opts.openEditorFiles,
     recentTouchedPaths: opts.recentTouchedPaths,
     userText: opts.latestUserText,
-    budgetTokens: alloc.selectedFilesBudget,
+    budgetTokens: Math.round(alloc.selectedFilesBudget * fileScale),
   });
 
   let brainBlock = brainPack(memory, { budgetTokens: alloc.brainBudget, shrinkLevel: 0 });
@@ -203,50 +221,32 @@ export async function buildAgentMessages(
     return estimateTokens(sys) + conv.reduce((s, m) => s + estimateTokens(m.content), 0);
   };
 
-  let sysPrompt = assembleSystemPrompt({
-    envBlock,
-    brainBlock,
-    indexBlock,
-    selectedFilesBlock,
-    modePreamble,
-  });
+  const makeSys = (selFiles: string, brain: string) =>
+    assembleSystemPrompt({
+      envBlock,
+      brainBlock: brain,
+      indexBlock,
+      selectedFilesBlock: selFiles,
+      modePreamble,
+      strictFormat,
+    });
 
-  // Emergency ordered shrinking: 1) selected files -> 2) older conversation -> 3) decisions -> 4) changelog
+  let sysPrompt = makeSys(selectedFilesBlock, brainBlock);
+
   if (totalTokensFor(sysPrompt, olderChatMsgs) > alloc.totalBudget) {
     selectedFilesBlock = '';
-    sysPrompt = assembleSystemPrompt({
-      envBlock,
-      brainBlock,
-      indexBlock,
-      selectedFilesBlock,
-      modePreamble,
-    });
+    sysPrompt = makeSys(selectedFilesBlock, brainBlock);
   }
-
   if (totalTokensFor(sysPrompt, olderChatMsgs) > alloc.totalBudget) {
     olderChatMsgs = [];
   }
-
   if (totalTokensFor(sysPrompt, olderChatMsgs) > alloc.totalBudget) {
     brainBlock = brainPack(memory, { budgetTokens: alloc.brainBudget, shrinkLevel: 1 });
-    sysPrompt = assembleSystemPrompt({
-      envBlock,
-      brainBlock,
-      indexBlock,
-      selectedFilesBlock,
-      modePreamble,
-    });
+    sysPrompt = makeSys(selectedFilesBlock, brainBlock);
   }
-
   if (totalTokensFor(sysPrompt, olderChatMsgs) > alloc.totalBudget) {
     brainBlock = brainPack(memory, { budgetTokens: alloc.brainBudget, shrinkLevel: 2 });
-    sysPrompt = assembleSystemPrompt({
-      envBlock,
-      brainBlock,
-      indexBlock,
-      selectedFilesBlock,
-      modePreamble,
-    });
+    sysPrompt = makeSys(selectedFilesBlock, brainBlock);
   }
 
   return [

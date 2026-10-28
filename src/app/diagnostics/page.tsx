@@ -107,7 +107,7 @@ export default function DiagnosticsPage() {
               System Diagnostics
             </h1>
             <p className="text-sm text-kalpa-muted">
-              Live browser verification for IndexedDB, Web Workers, Pyodide, Sandpack, and BYOK streaming.
+              Live browser verification for IndexedDB, Agent Protocol, Checkpoints, Brain Index, Pyodide, Sandpack, Cloud Sandbox, and BYOK streaming.
             </p>
           </div>
           <div className="flex items-center gap-2">

@@ -41,7 +41,12 @@ interface ProjectStoreState {
   dirtyBuffers: Record<string, string>;
 
   loadProjects: () => Promise<void>;
-  createProject: (opts: { name?: string; stack: StackKind; initialPrompt?: string }) => Promise<ProjectRecord>;
+  createProject: (opts: {
+    name?: string;
+    stack: StackKind;
+    engine?: 'instant' | 'cloud';
+    initialPrompt?: string;
+  }) => Promise<ProjectRecord>;
   renameProject: (id: string, name: string) => Promise<void>;
   duplicateProject: (id: string) => Promise<ProjectRecord | null>;
   deleteProject: (id: string) => Promise<void>;
@@ -81,7 +86,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     }
   },
 
-  createProject: async ({ name, stack, initialPrompt }) => {
+  createProject: async ({ name, stack, engine = 'instant', initialPrompt }) => {
     const db = await getKalpaDB();
     const now = Date.now();
     const id = uid('proj');
@@ -102,7 +107,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       createdAt: now,
       updatedAt: now,
       stack,
-      engine: 'instant',
+      engine,
     };
 
     await db.put('projects', record);
@@ -228,7 +233,9 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       return false;
     }
     const [files, snapshot] = await Promise.all([vfs.list(projectId), vfs.snapshot(projectId)]);
-    const visiblePaths = files.map((f) => f.path).filter((p) => !p.endsWith('/.gitkeep'));
+    const visiblePaths = files
+      .map((f) => f.path)
+      .filter((p) => !p.endsWith('/.gitkeep') && !p.startsWith('.kalpa/'));
     const initialFile = getDefaultOpenFile(proj.stack, visiblePaths);
     set({
       currentProject: proj,

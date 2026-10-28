@@ -3,6 +3,10 @@ import { runJsInWorker } from '@/lib/runtime/jsWorker';
 import { pingPyodideWorker } from '@/lib/runtime/pyodideWorker';
 import { useProviderStore } from '@/lib/providers/store';
 import { formatBytes } from '@/lib/utils';
+import {
+  executeAgentDiagnosticsSuite,
+  INITIAL_AGENT_DIAGNOSTIC_CHECKS,
+} from './agentDiagnostics';
 
 export type CheckState = 'RUNNING' | 'PASS' | 'FAIL' | 'INFO';
 
@@ -19,6 +23,7 @@ export const INITIAL_DIAGNOSTIC_CHECKS: DiagItem[] = [
   { id: 'quota', label: 'Browser Storage Quota', state: 'RUNNING', detail: 'Estimating…' },
   { id: 'worker', label: 'Web Worker Execution', state: 'RUNNING', detail: 'Spawning worker…' },
   { id: 'wasm', label: 'WebAssembly Support', state: 'RUNNING', detail: 'Compiling module…' },
+  ...INITIAL_AGENT_DIAGNOSTIC_CHECKS,
   { id: 'pyodide', label: 'Pyodide Python Runtime', state: 'RUNNING', detail: 'Loading Pyodide v0.26.4…' },
   { id: 'sandpack', label: 'Sandpack Render Self-Test', state: 'RUNNING', detail: 'Waiting for bundler done event…' },
   { id: 'provider', label: 'Active AI Provider Test', state: 'RUNNING', detail: 'Checking active profile…' },
@@ -162,7 +167,9 @@ export async function executeDiagnosticsSuite(
     });
   }
 
-  // 7. Pyodide & Active Provider (in parallel)
+  // 7. Agent Engine, Pyodide & Active Provider (in parallel)
+  const agentPromise = executeAgentDiagnosticsSuite(upsertCheck);
+
   const pyPromise = pingPyodideWorker((status) => {
     upsertCheck({
       id: 'pyodide',
@@ -206,5 +213,5 @@ export async function executeDiagnosticsSuite(
     });
   })();
 
-  await Promise.all([pyPromise, provPromise]);
+  await Promise.all([agentPromise, pyPromise, provPromise]);
 }

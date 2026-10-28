@@ -14,12 +14,18 @@ function triggerDownload(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-export async function downloadProjectZip(projectId: string, projectName: string): Promise<void> {
+export async function downloadProjectZip(
+  projectId: string,
+  projectName: string,
+  opts?: { includeBrain?: boolean }
+): Promise<void> {
+  const includeBrain = Boolean(opts?.includeBrain);
   const db = await getKalpaDB();
   const rows = await db.getAllFromIndex('files', 'by-project', projectId);
   const zip = new JSZip();
   for (const row of rows) {
     if (row.path.endsWith('/.gitkeep')) continue;
+    if (!includeBrain && (row.path === '.kalpa' || row.path.startsWith('.kalpa/'))) continue;
     if (row.encoding === 'base64') {
       zip.file(row.path, row.content, { base64: true });
     } else {

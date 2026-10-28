@@ -3,8 +3,10 @@
 import React, { useEffect, useMemo } from 'react';
 import {
   AlertCircle,
+  Cloud,
   ExternalLink,
   Laptop,
+  Play,
   RotateCw,
   Smartphone,
   Tablet,
@@ -13,20 +15,31 @@ import {
 import { detectProjectType } from '@/lib/preview/detect';
 import { buildStaticHtmlDocument } from '@/lib/preview/staticHtml';
 import { buildSandpackBundle } from '@/lib/preview/sandpackFiles';
+import { useProviderStore } from '@/lib/providers/store';
 import { usePreviewStore } from '@/stores/preview';
 import { useProjectStore } from '@/stores/project';
+import { useSandboxStore } from '@/stores/sandbox';
 import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { IconButton } from '@/components/ui/IconButton';
 import { SandpackStage } from './SandpackStage';
 import { ScriptRunnerView } from './ScriptRunnerView';
 import { PreviewConsoleDrawer } from './PreviewConsoleDrawer';
+import { CloudPreviewStage } from './CloudPreviewStage';
 
 export function PreviewPanel() {
   const { breakpoint } = useBreakpoint();
   const currentProject = useProjectStore((s) => s.currentProject);
   const snapshot = useProjectStore((s) => s.snapshot);
   const activeFilePath = useProjectStore((s) => s.activeFilePath);
+  const e2bApiKey = useProviderStore((s) => s.e2bApiKey);
+
+  const engine = useSandboxStore((s) => s.engine);
+  const devServerStatus = useSandboxStore((s) => s.devServerStatus);
+  const devServerPort = useSandboxStore((s) => s.devServerPort);
+  const devServerUrl = useSandboxStore((s) => s.devServerUrl);
+  const runDevServer = useSandboxStore((s) => s.runDevServer);
+  const switchEngine = useSandboxStore((s) => s.switchEngine);
 
   const status = usePreviewStore((s) => s.status);
   const deviceFrame = usePreviewStore((s) => s.deviceFrame);
@@ -60,7 +73,7 @@ export function PreviewPanel() {
   }, [pushEntry]);
 
   useEffect(() => {
-    if (projectType !== 'static') {
+    if (engine === 'cloud' || projectType !== 'static') {
       setStaticBlobUrl(null);
       return;
     }
@@ -72,9 +85,10 @@ export function PreviewPanel() {
     return () => {
       URL.revokeObjectURL(url);
     };
-  }, [projectType, snapshot, reloadNonce, setStaticBlobUrl, setStatus]);
+  }, [engine, projectType, snapshot, reloadNonce, setStaticBlobUrl, setStatus]);
 
   const sandpackBundle = useMemo(() => {
+    if (engine === 'cloud') return null;
     if (
       projectType === 'next' ||
       projectType === 'react' ||
@@ -86,7 +100,20 @@ export function PreviewPanel() {
       return buildSandpackBundle(projectType, snapshot);
     }
     return null;
-  }, [projectType, snapshot]);
+  }, [engine, projectType, snapshot]);
+
+  const handleQuickSwitchToCloud = async () => {
+    if (!currentProject) return;
+    if (!e2bApiKey.trim()) {
+      addToast({
+        title: 'Add E2B API key in Settings -> Engines',
+        description: 'Cloud Sandbox runs a real Linux server using your own E2B key.',
+        kind: 'info',
+      });
+      return;
+    }
+    await switchEngine(currentProject.id, 'cloud');
+  };
 
   const errorCount = entries.filter((e) => e.level === 'error').length;
   const frameWidthClass =
@@ -96,6 +123,32 @@ export function PreviewPanel() {
         ? 'w-[820px] max-w-full mx-auto border-x border-kalpa-border shadow-kalpa-soft'
         : 'w-full';
 
+  const externalHref =
+    engine === 'cloud'
+      ? devServerUrl
+      : projectType === 'static'
+        ? staticBlobUrl
+        : null;
+
+  const statusText =
+    engine === 'cloud'
+      ? devServerStatus === 'installing'
+        ? 'Installing…'
+        : devServerStatus === 'starting'
+          ? `Starting :${devServerPort}…`
+          : devServerStatus === 'running'
+            ? `Cloud :${devServerPort}`
+            : devServerStatus === 'crashed'
+              ? 'Server crashed'
+              : 'Cloud idle'
+      : status === 'building'
+        ? 'Building…'
+        : errorCount > 0
+          ? `Error (${errorCount})`
+          : status === 'ready'
+            ? 'Ready'
+            : 'Preview';
+
   return (
     <div className="relative h-full flex flex-col bg-kalpa-bg">
       <div className="h-11 px-2.5 border-b border-kalpa-border bg-kalpa-bg-2 flex items-center justify-between gap-2 shrink-0">
@@ -104,15 +157,17 @@ export function PreviewPanel() {
             <RotateCw className="w-3.5 h-3.5" />
           </IconButton>
 
-          <span className="text-xs font-medium text-kalpa-muted truncate">
-            {status === 'building'
-              ? 'Building…'
-              : errorCount > 0
-                ? `Error (${errorCount})`
-                : status === 'ready'
-                  ? 'Ready'
-                  : 'Preview'}
-          </span>
+          {engine === 'cloud' && currentProject ? (
+            <IconButton
+              label="Restart Cloud dev server"
+              size="sm"
+              onClick={() => runDevServer(currentProject.id)}
+            >
+              <Play className="w-3.5 h-3.5 text-kalpa-success" />
+            </IconButton>
+          ) : null}
+
+          <span className="text-xs font-medium text-kalpa-muted truncate">{statusText}</span>
         </div>
 
         <div className="flex items-center gap-0.5 shrink-0">
@@ -145,21 +200,23 @@ export function PreviewPanel() {
             </>
           ) : null}
 
-          <IconButton
-            label="Toggle preview console"
-            size="sm"
-            active={consoleOpen}
-            onClick={() => setConsoleOpen(!consoleOpen)}
-          >
-            <TerminalSquare className="w-3.5 h-3.5" />
-          </IconButton>
+          {engine === 'instant' ? (
+            <IconButton
+              label="Toggle preview console"
+              size="sm"
+              active={consoleOpen}
+              onClick={() => setConsoleOpen(!consoleOpen)}
+            >
+              <TerminalSquare className="w-3.5 h-3.5" />
+            </IconButton>
+          ) : null}
 
-          {projectType === 'static' && staticBlobUrl ? (
+          {externalHref ? (
             <a
-              href={staticBlobUrl}
+              href={externalHref}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label="Open static preview in new tab"
+              aria-label="Open preview in new tab"
               title="Open in new tab"
               className="inline-flex items-center justify-center min-h-[36px] min-w-[36px] p-1.5 rounded-[10px] text-kalpa-muted hover:text-kalpa-text hover:bg-kalpa-surface"
             >
@@ -173,7 +230,7 @@ export function PreviewPanel() {
                 addToast({
                   title: 'In-memory bundler preview',
                   description:
-                    'Sandpack compiles files in browser memory. Export ZIP or use static HTML to open standalone tabs.',
+                    'Switch to Cloud Sandbox or export ZIP to get a standalone public URL.',
                   kind: 'info',
                 })
               }
@@ -184,26 +241,50 @@ export function PreviewPanel() {
         </div>
       </div>
 
-      {sandpackBundle?.hasTailwindV4Warning ? (
-        <div className="px-3 py-1.5 bg-kalpa-warn/15 border-b border-kalpa-warn/30 text-[11px] text-kalpa-warn shrink-0">
-          Tailwind v4 (@import &quot;tailwindcss&quot; / @theme) is not supported in Instant preview — use standard utility classes or Cloud Sandbox (Prompt 2).
+      {engine === 'instant' && sandpackBundle?.hasTailwindV4Warning ? (
+        <div className="px-3 py-1.5 bg-kalpa-warn/15 border-b border-kalpa-warn/30 text-[11px] text-kalpa-warn flex items-center justify-between gap-2 shrink-0">
+          <span className="truncate">
+            Tailwind v4 (@import &quot;tailwindcss&quot;) needs PostCSS or standard Tailwind classes.
+          </span>
+          <button
+            type="button"
+            onClick={handleQuickSwitchToCloud}
+            className="underline font-semibold shrink-0 cursor-pointer"
+          >
+            Use Cloud Sandbox
+          </button>
         </div>
       ) : null}
 
-      {sandpackBundle && sandpackBundle.unsupportedNextFeatures.length > 0 ? (
-        <div className="px-3 py-1.5 bg-kalpa-violet/15 border-b border-kalpa-violet/35 text-[11px] text-kalpa-text flex items-center gap-1.5 shrink-0">
-          <AlertCircle className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
-          <span className="truncate">
-            Needs Cloud Sandbox (Prompt 2):{' '}
-            {sandpackBundle.unsupportedNextFeatures
-              .map((u) => `${u.file} (${u.reason})`)
-              .join(', ')}
-          </span>
+      {engine === 'instant' && sandpackBundle && sandpackBundle.unsupportedNextFeatures.length > 0 ? (
+        <div className="px-3 py-1.5 bg-kalpa-violet/15 border-b border-kalpa-violet/35 text-[11px] text-kalpa-text flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <AlertCircle className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
+            <span className="truncate">
+              Server features detected:{' '}
+              {sandpackBundle.unsupportedNextFeatures
+                .map((u) => `${u.file} (${u.reason})`)
+                .join(', ')}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleQuickSwitchToCloud}
+            className="inline-flex items-center gap-1 text-kalpa-violet font-semibold hover:underline shrink-0 cursor-pointer"
+          >
+            <Cloud className="w-3 h-3" /> Switch to Cloud
+          </button>
         </div>
       ) : null}
 
       <div className="flex-1 min-h-0 overflow-hidden bg-kalpa-bg flex flex-col">
-        {projectType === 'static' && staticBlobUrl ? (
+        {engine === 'cloud' && currentProject ? (
+          <CloudPreviewStage
+            projectId={currentProject.id}
+            reloadNonce={reloadNonce}
+            frameWidthClass={frameWidthClass}
+          />
+        ) : projectType === 'static' && staticBlobUrl ? (
           <div className={`flex-1 min-h-0 bg-white ${frameWidthClass}`}>
             <iframe
               key={`static-${currentProject?.id ?? 'none'}-${reloadNonce}`}
@@ -232,52 +313,13 @@ export function PreviewPanel() {
           <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-kalpa-muted space-y-2">
             <p className="text-sm font-medium text-kalpa-text">No runnable web or script entry yet</p>
             <p className="text-xs max-w-sm leading-relaxed">
-              Instant Preview supports <code className="font-mono">index.html</code>, React/Vue/Svelte apps, Next.js App Router (<code className="font-mono">app/page.tsx</code>), Python (<code className="font-mono">.py</code>), and JS scripts.
+              Ask Kalpa in Chat to build an app or script — Preview supports static HTML, React/Vue/Svelte, Next.js, Python, JS, and full Linux servers in Cloud Sandbox.
             </p>
           </div>
         )}
 
-        {consoleOpen ? <PreviewConsoleDrawer /> : null}
+        {engine === 'instant' && consoleOpen ? <PreviewConsoleDrawer /> : null}
       </div>
-
-      {breakpoint === 'phone' && (projectType === 'static' || sandpackBundle) ? (
-        <div className="absolute right-3 bottom-3 z-20 flex items-center gap-2">
-          <button
-            type="button"
-            aria-label="Reload preview"
-            onClick={reloadPreview}
-            className="min-h-[44px] min-w-[44px] rounded-full kalpa-glass shadow-kalpa-soft flex items-center justify-center text-kalpa-text cursor-pointer"
-          >
-            <RotateCw className="w-4 h-4" />
-          </button>
-          {projectType === 'static' && staticBlobUrl ? (
-            <a
-              href={staticBlobUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="Open preview in new tab"
-              className="min-h-[44px] min-w-[44px] rounded-full kalpa-glass shadow-kalpa-soft flex items-center justify-center text-kalpa-text"
-            >
-              <ExternalLink className="w-4 h-4" />
-            </a>
-          ) : (
-            <button
-              type="button"
-              aria-label="Open in new tab info"
-              onClick={() =>
-                addToast({
-                  title: 'Sandpack runs in memory',
-                  description: 'Static HTML projects open directly in a new tab via Blob URL.',
-                  kind: 'info',
-                })
-              }
-              className="min-h-[44px] min-w-[44px] rounded-full kalpa-glass shadow-kalpa-soft flex items-center justify-center text-kalpa-text cursor-pointer"
-            >
-              <ExternalLink className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-      ) : null}
     </div>
   );
 }

@@ -18,7 +18,7 @@ export const STARTER_OPTIONS: StarterOption[] = [
     id: 'auto',
     label: 'Auto',
     shortLabel: 'Auto',
-    description: 'Blank workspace now; AI chooses stack in Prompt 2',
+    description: 'Kalpa Agent picks the lightest stack for your idea',
     defaultFile: 'README.md',
   },
   {

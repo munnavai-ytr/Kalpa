@@ -11,6 +11,7 @@ import { json } from '@codemirror/lang-json';
 import { python } from '@codemirror/lang-python';
 import { markdown } from '@codemirror/lang-markdown';
 import { FileCode2, Lock } from 'lucide-react';
+import { isReadOnlyBrainPath } from '@/lib/brain/caps';
 import { vfs } from '@/lib/vfs/vfs';
 import {
   isBinaryPath,
@@ -168,8 +169,10 @@ export function CodeEditor() {
     return list;
   }, [activeFilePath, editorWordWrap, effectiveFontSize, isLight]);
 
+  const isReadOnly = activeFilePath ? isReadOnlyBrainPath(activeFilePath) : false;
+
   const handleChange = (val: string) => {
-    if (!activeFilePath) return;
+    if (!activeFilePath || isReadOnly) return;
     setDirtyBuffer(activeFilePath, val);
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     const pathSnapshot = activeFilePath;
@@ -225,24 +228,34 @@ export function CodeEditor() {
   const currentDoc = dirtyBuffers[activeFilePath] ?? snapshot[activeFilePath] ?? '';
 
   return (
-    <div className="h-full w-full overflow-hidden bg-kalpa-bg">
-      <CodeMirror
-        ref={cmRef}
-        value={currentDoc}
-        theme={isLight ? 'light' : 'dark'}
-        height="100%"
-        className="h-full"
-        basicSetup={{
-          lineNumbers: true,
-          bracketMatching: true,
-          foldGutter: true,
-          indentOnInput: true,
-          highlightActiveLine: true,
-          searchKeymap: false,
-        }}
-        extensions={extensions}
-        onChange={handleChange}
-      />
+    <div className="h-full w-full overflow-hidden bg-kalpa-bg flex flex-col">
+      {isReadOnly ? (
+        <div className="px-3 py-1.5 border-b border-kalpa-border bg-kalpa-surface flex items-center gap-2 text-[11px] text-kalpa-muted shrink-0">
+          <Lock className="w-3 h-3 shrink-0" />
+          <span>Auto-generated Brain index (read-only)</span>
+        </div>
+      ) : null}
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <CodeMirror
+          ref={cmRef}
+          value={currentDoc}
+          readOnly={isReadOnly}
+          editable={!isReadOnly}
+          theme={isLight ? 'light' : 'dark'}
+          height="100%"
+          className="h-full"
+          basicSetup={{
+            lineNumbers: true,
+            bracketMatching: true,
+            foldGutter: true,
+            indentOnInput: true,
+            highlightActiveLine: true,
+            searchKeymap: false,
+          }}
+          extensions={extensions}
+          onChange={handleChange}
+        />
+      </div>
     </div>
   );
 }

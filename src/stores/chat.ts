@@ -7,6 +7,12 @@ import { streamChat, type ChatMessage } from '@/lib/providers/core';
 import { useProviderStore } from '@/lib/providers/store';
 import { APP_NAME } from '@/lib/brand';
 import { uid } from '@/lib/utils';
+import { runTurn } from '@/lib/agent/orchestrator';
+import { buildContinueMessage } from '@/lib/agent/prompts/system';
+import { parseMilestonesFromTasks, readAllBrainMemory } from '@/lib/brain/files';
+import { useAgentStore } from './agent';
+import { useBrainStore } from './brain';
+import { useUiStore } from './ui';
 
 interface ChatStoreState {
   projectId: string | null;
@@ -18,65 +24,25 @@ interface ChatStoreState {
   loadChat: (projectId: string) => Promise<ChatRecord[]>;
   setComposerDraft: (draft: string) => void;
   sendUserMessage: (projectId: string, text: string) => Promise<void>;
-  streamReplyForHistory: (projectId: string, history: ChatRecord[]) => Promise<void>;
+  runInitialProjectTurn: (projectId: string, initialPrompt: string) => Promise<void>;
+  streamPlainChatReply: (projectId: string, text: string) => Promise<void>;
   stopStreaming: () => void;
   regenerateLast: (projectId: string) => Promise<void>;
   clearChat: (projectId: string) => Promise<void>;
 }
 
-let activeAbort: AbortController | null = null;
+let plainChatAbort: AbortController | null = null;
 
-function buildSystemPrompt(filePaths: string[]): string {
+function buildPlainChatSystemPrompt(filePaths: string[]): string {
   const listed =
     filePaths.length > 0
       ? `Current project files:\n${filePaths.slice(0, 180).map((p) => `- ${p}`).join('\n')}`
       : 'The project currently has no files.';
   return [
     `You are ${APP_NAME}, a helpful full-stack coding assistant inside a browser IDE.`,
-    'When providing complete file code blocks, place a file path comment on the very first line inside the fenced code block (for example `// src/App.tsx`, `# main.py`, or `<!-- index.html -->`) so the user can insert it directly into their project with one click.',
+    'This is a /chat conversation-only turn: answer clearly in plain Markdown without emitting XML action tags.',
     listed,
   ].join('\n\n');
-}
-
-function classifyStreamError(err: unknown, baseUrl: string, usingProxy: boolean): {
-  message: string;
-  status?: number;
-  suggestProxy: boolean;
-} {
-  const raw = err instanceof Error ? err.message : String(err);
-  const statusMatch = raw.match(/^(\d{3})\b/);
-  const status = statusMatch ? Number(statusMatch[1]) : undefined;
-  const isLocal = /localhost|127\.0\.0\.1/.test(baseUrl);
-  const isCors = !usingProxy && !isLocal && /failed to fetch|networkerror|load failed|cors/i.test(raw);
-
-  if (status === 401 || status === 403) {
-    return {
-      message: `Authentication failed (${status}). Check your API key in Settings.`,
-      status,
-      suggestProxy: false,
-    };
-  }
-  if (status === 429) {
-    return {
-      message: 'Rate limit or quota reached (429). Wait a moment or switch models.',
-      status,
-      suggestProxy: false,
-    };
-  }
-  if (/context_length|maximum context|too many tokens|prompt is too long/i.test(raw)) {
-    return {
-      message: 'Conversation exceeds model context window. Clear chat or switch to a larger-context model.',
-      status,
-      suggestProxy: false,
-    };
-  }
-  if (isCors) {
-    return {
-      message: 'Network or CORS error reaching provider directly from browser.',
-      suggestProxy: true,
-    };
-  }
-  return { message: raw, status, suggestProxy: false };
 }
 
 export const useChatStore = create<ChatStoreState>((set, get) => ({
@@ -96,30 +62,114 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
   setComposerDraft: (composerDraft) => set({ composerDraft }),
 
-  /** Single entry point for sending a user message (Prompt 2 replaces with agent orchestrator). */
-  sendUserMessage: async (projectId, text) => {
-    const trimmed = text.trim();
-    if (!trimmed || get().isStreaming) return;
+  sendUserMessage: async (projectId, rawText) => {
+    const trimmed = rawText.trim();
+    if (!trimmed) return;
+    if (get().isStreaming || useAgentStore.getState().isRunning) return;
 
+    // Slash command router
+    if (trimmed === '/brain') {
+      useBrainStore.getState().setBrainOpen(true);
+      return;
+    }
+
+    if (trimmed === '/clear') {
+      await get().clearChat(projectId);
+      useUiStore.getState().addToast({
+        title: 'Chat history cleared',
+        description: 'Project files, Brain memory, and Checkpoints were kept intact.',
+        kind: 'info',
+      });
+      return;
+    }
+
+    if (trimmed === '/undo') {
+      const res = await useAgentStore.getState().undoTurnMessage(projectId);
+      await get().loadChat(projectId);
+      useUiStore.getState().addToast({
+        title: res.label,
+        kind: res.ok ? 'success' : 'warn',
+      });
+      return;
+    }
+
+    if (trimmed === '/redo') {
+      const res = await useAgentStore.getState().redoTurnMessage(projectId);
+      await get().loadChat(projectId);
+      useUiStore.getState().addToast({
+        title: res.label,
+        kind: res.ok ? 'success' : 'warn',
+      });
+      return;
+    }
+
+    if (trimmed === '/continue' || trimmed.startsWith('/continue ')) {
+      const extra = trimmed.slice('/continue'.length).trim();
+      const mem = await readAllBrainMemory(projectId);
+      const parsed = parseMilestonesFromTasks(mem.tasks);
+      const nextItem = parsed.items.find((i) => !i.done);
+      const targetId = extra || nextItem?.id || 'next milestone';
+      await runTurn(projectId, buildContinueMessage(targetId), {
+        mode: 'CONTINUE',
+        onMessagesChanged: (msgs) => set({ messages: msgs }),
+      });
+      return;
+    }
+
+    if (trimmed === '/plan' || trimmed.startsWith('/plan ')) {
+      const idea =
+        trimmed.slice('/plan'.length).trim() ||
+        'Review the project and create or refine the milestone plan in Brain memory without editing code.';
+      await runTurn(projectId, idea, {
+        mode: 'PLAN',
+        onMessagesChanged: (msgs) => set({ messages: msgs }),
+      });
+      return;
+    }
+
+    if (trimmed === '/chat' || trimmed.startsWith('/chat ')) {
+      const msg = trimmed.slice('/chat'.length).trim();
+      if (!msg) {
+        useUiStore.getState().addToast({
+          title: 'Usage: /chat <your question>',
+          description: 'Starts a plain conversation turn without file actions.',
+          kind: 'info',
+        });
+        return;
+      }
+      await get().streamPlainChatReply(projectId, msg);
+      return;
+    }
+
+    // Default: full Kalpa Agent Engine turn
+    await runTurn(projectId, trimmed, {
+      onMessagesChanged: (msgs) => set({ messages: msgs }),
+    });
+  },
+
+  runInitialProjectTurn: async (projectId, initialPrompt) => {
+    await runTurn(projectId, initialPrompt, {
+      mode: 'NEW_PROJECT',
+      skipAddingUserMessage: true,
+      onMessagesChanged: (msgs) => set({ messages: msgs }),
+    });
+  },
+
+  streamPlainChatReply: async (projectId, text) => {
     const db = await getKalpaDB();
     const userMsg: ChatRecord = {
       id: uid('msg'),
       projectId,
       role: 'user',
-      content: trimmed,
+      content: `/chat ${text}`,
       createdAt: Date.now(),
+      meta: { plainChat: true },
     };
     await db.put('chat', userMsg);
-    const nextHistory = [...get().messages, userMsg];
-    set({ messages: nextHistory });
+    const history = [...get().messages, userMsg];
+    set({ messages: history });
 
-    await get().streamReplyForHistory(projectId, nextHistory);
-  },
-
-  streamReplyForHistory: async (projectId, history) => {
     const profile = useProviderStore.getState().getActiveProfile();
-    const db = await getKalpaDB();
-
     if (!profile || (!profile.apiKey && !/localhost|127\.0\.0\.1/.test(profile.baseUrl))) {
       const errMsg: ChatRecord = {
         id: uid('msg'),
@@ -128,6 +178,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         content: '',
         createdAt: Date.now(),
         meta: {
+          plainChat: true,
           error: {
             message: 'No active provider API key configured. Add a key via the model switcher or Settings.',
           },
@@ -139,16 +190,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }
 
     const fileMetas = await vfs.list(projectId);
-    const paths = fileMetas.map((f) => f.path).filter((p) => !p.endsWith('/.gitkeep'));
+    const paths = fileMetas.map((f) => f.path).filter((p) => !p.startsWith('.kalpa/') && !p.endsWith('/.gitkeep'));
     const apiMessages: ChatMessage[] = [
-      { role: 'system', content: buildSystemPrompt(paths) },
+      { role: 'system', content: buildPlainChatSystemPrompt(paths) },
       ...history
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim().length > 0)
+        .slice(-10)
         .map((m) => ({ role: m.role, content: m.content })),
     ];
 
     const controller = new AbortController();
-    activeAbort = controller;
+    plainChatAbort = controller;
     set({ isStreaming: true, streamingText: '' });
 
     let fullText = '';
@@ -157,9 +209,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
     const flushUi = () => {
       rafPending = false;
-      if (get().isStreaming) {
-        set({ streamingText: fullText });
-      }
+      if (get().isStreaming) set({ streamingText: fullText });
     };
 
     try {
@@ -186,6 +236,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         content: fullText || '(empty response)',
         createdAt: Date.now(),
         meta: {
+          plainChat: true,
           usage,
           model: profile.model,
           providerLabel: profile.label,
@@ -198,66 +249,49 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         streamingText: '',
       }));
     } catch (err) {
-      if (controller.signal.aborted) {
-        if (fullText.trim()) {
-          const partial: ChatRecord = {
-            id: uid('msg'),
-            projectId,
-            role: 'assistant',
-            content: `${fullText}\n\n*(Stopped)*`,
-            createdAt: Date.now(),
-            meta: { usage, model: profile.model, providerLabel: profile.label },
-          };
-          await db.put('chat', partial);
-          set((s) => ({
-            messages: [...s.messages, partial],
-            isStreaming: false,
-            streamingText: '',
-          }));
-        } else {
-          set({ isStreaming: false, streamingText: '' });
-        }
-        return;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!controller.signal.aborted) {
+        const errRecord: ChatRecord = {
+          id: uid('msg'),
+          projectId,
+          role: 'assistant',
+          content: fullText,
+          createdAt: Date.now(),
+          meta: {
+            plainChat: true,
+            error: { message: msg },
+            model: profile.model,
+            providerLabel: profile.label,
+          },
+        };
+        await db.put('chat', errRecord);
+        set((s) => ({
+          messages: [...s.messages, errRecord],
+          isStreaming: false,
+          streamingText: '',
+        }));
+      } else {
+        set({ isStreaming: false, streamingText: '' });
       }
-
-      const classified = classifyStreamError(err, profile.baseUrl, profile.useProxy);
-      const errRecord: ChatRecord = {
-        id: uid('msg'),
-        projectId,
-        role: 'assistant',
-        content: fullText,
-        createdAt: Date.now(),
-        meta: {
-          error: classified,
-          model: profile.model,
-          providerLabel: profile.label,
-        },
-      };
-      await db.put('chat', errRecord);
-      set((s) => ({
-        messages: [...s.messages, errRecord],
-        isStreaming: false,
-        streamingText: '',
-      }));
     } finally {
-      if (activeAbort === controller) activeAbort = null;
+      if (plainChatAbort === controller) plainChatAbort = null;
     }
   },
 
   stopStreaming: () => {
-    if (activeAbort) {
-      activeAbort.abort();
-      activeAbort = null;
+    if (plainChatAbort) {
+      plainChatAbort.abort();
+      plainChatAbort = null;
     }
+    useAgentStore.getState().stopTurn();
   },
 
   regenerateLast: async (projectId) => {
-    if (get().isStreaming) return;
+    if (get().isStreaming || useAgentStore.getState().isRunning) return;
     const msgs = [...get().messages];
     if (msgs.length === 0) return;
     const db = await getKalpaDB();
 
-    // Remove trailing assistant message(s) so we re-run from the last user turn
     while (msgs.length > 0 && msgs[msgs.length - 1].role === 'assistant') {
       const removed = msgs.pop()!;
       await db.delete('chat', removed.id);
@@ -266,8 +300,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       set({ messages: [] });
       return;
     }
+    const lastUser = msgs[msgs.length - 1];
     set({ messages: msgs });
-    await get().streamReplyForHistory(projectId, msgs);
+    await runTurn(projectId, lastUser.content, {
+      skipAddingUserMessage: true,
+      onMessagesChanged: (updated) => set({ messages: updated }),
+    });
   },
 
   clearChat: async (projectId) => {

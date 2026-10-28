@@ -37,10 +37,35 @@ const nextConfig: NextConfig = {
       },
     ];
   },
-  webpack: (config, { dev }) => {
+  webpack: (config, { dev, isServer, webpack }) => {
     if (dev && process.env.DISABLE_HMR === 'true') {
       config.watchOptions = {
         ignored: /.*/,
+      };
+    }
+    if (!isServer) {
+      config.plugins.push(
+        new webpack.NormalModuleReplacementPlugin(/^node:/, (resource: { request: string }) => {
+          resource.request = resource.request.replace(/^node:/, '');
+        })
+      );
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        crypto: false,
+        fs: false,
+        'fs/promises': false,
+        os: false,
+        path: false,
+        stream: false,
+        url: false,
+        vm: false,
+        zlib: false,
+        net: false,
+        tls: false,
+        http: false,
+        https: false,
+        child_process: false,
+        worker_threads: false,
       };
     }
     return config;

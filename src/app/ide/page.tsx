@@ -5,6 +5,9 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useProjectStore } from '@/stores/project';
 import { useChatStore } from '@/stores/chat';
+import { useBrainStore } from '@/stores/brain';
+import { useAgentStore } from '@/stores/agent';
+import { useSandboxStore } from '@/stores/sandbox';
 import { useProviderStore } from '@/lib/providers/store';
 import { IdeShell } from '@/components/ide/IdeShell';
 import { Spinner } from '@/components/ui/Spinner';
@@ -19,11 +22,18 @@ function IdeRouteInner() {
 
   const openWorkspace = useProjectStore((s) => s.openWorkspace);
   const loadChat = useChatStore((s) => s.loadChat);
-  const streamReplyForHistory = useChatStore((s) => s.streamReplyForHistory);
+  const runInitialProjectTurn = useChatStore((s) => s.runInitialProjectTurn);
+  const loadBrain = useBrainStore((s) => s.loadBrain);
+  const hydratePrefs = useAgentStore((s) => s.hydratePrefs);
+  const syncEngineFromProject = useSandboxStore((s) => s.syncEngineFromProject);
   const initProviders = useProviderStore((s) => s.initProviders);
 
   const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading');
   const ranInitialRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    hydratePrefs();
+  }, [hydratePrefs]);
 
   useEffect(() => {
     if (!projectId) {
@@ -39,12 +49,19 @@ function IdeRouteInner() {
       const [found, history] = await Promise.all([
         openWorkspace(projectId),
         loadChat(projectId),
+        loadBrain(projectId),
       ]);
       if (cancelled) return;
       if (!found) {
         setStatus('missing');
         return;
       }
+
+      const proj = useProjectStore.getState().currentProject;
+      if (proj) {
+        syncEngineFromProject(proj.id, proj.engine);
+      }
+
       setStatus('ready');
 
       if (
@@ -57,14 +74,24 @@ function IdeRouteInner() {
         if (typeof window !== 'undefined') {
           window.history.replaceState(null, '', `/ide?p=${encodeURIComponent(projectId)}`);
         }
-        void streamReplyForHistory(projectId, history);
+        const initialPrompt = history[history.length - 1].content;
+        void runInitialProjectTurn(projectId, initialPrompt);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [projectId, shouldAutoRun, initProviders, openWorkspace, loadChat, streamReplyForHistory]);
+  }, [
+    projectId,
+    shouldAutoRun,
+    initProviders,
+    openWorkspace,
+    loadChat,
+    loadBrain,
+    syncEngineFromProject,
+    runInitialProjectTurn,
+  ]);
 
   if (status === 'loading') {
     return (

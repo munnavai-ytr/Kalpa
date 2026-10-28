@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Settings } from 'lucide-react';
 import { TAGLINE } from '@/lib/brand';
-import type { StackKind } from '@/lib/vfs/db';
+import type { EngineKind, StackKind } from '@/lib/vfs/db';
 import { useProviderStore } from '@/lib/providers/store';
 import { useProjectStore } from '@/stores/project';
 import { Logo } from '@/components/brand/Logo';
@@ -27,31 +27,35 @@ export default function HomePage() {
   const [running, setRunning] = useState(false);
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
   const [keyRequiredSheet, setKeyRequiredSheet] = useState(false);
-  const [pendingRun, setPendingRun] = useState<{ prompt: string; stack: StackKind } | null>(null);
+  const [pendingRun, setPendingRun] = useState<{
+    prompt: string;
+    stack: StackKind;
+    engine: EngineKind;
+  } | null>(null);
 
   useEffect(() => {
     loadProjects();
   }, [loadProjects]);
 
-  const executeProjectLaunch = async (prompt: string, stack: StackKind) => {
+  const executeProjectLaunch = async (prompt: string, stack: StackKind, engine: EngineKind) => {
     setRunning(true);
     try {
-      const proj = await createProject({ stack, initialPrompt: prompt });
+      const proj = await createProject({ stack, engine, initialPrompt: prompt });
       router.push(`/ide?p=${encodeURIComponent(proj.id)}&run=1`);
     } finally {
       setRunning(false);
     }
   };
 
-  const handleRun = async (prompt: string, stack: StackKind) => {
+  const handleRun = async (prompt: string, stack: StackKind, engine: EngineKind) => {
     const active = getActiveProfile();
     const isLocal = active && /localhost|127\.0\.0\.1/.test(active.baseUrl);
     if (!active || (!active.apiKey && !isLocal)) {
-      setPendingRun({ prompt, stack });
+      setPendingRun({ prompt, stack, engine });
       setKeyRequiredSheet(true);
       return;
     }
-    await executeProjectLaunch(prompt, stack);
+    await executeProjectLaunch(prompt, stack, engine);
   };
 
   const hasAnyProvider = profiles.some(
@@ -62,7 +66,6 @@ export default function HomePage() {
     <div className="min-h-[100dvh] flex flex-col">
       <AuroraBackground />
 
-      {/* 3-Zone Top Bar Contract */}
       <header className="w-full pt-safe">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 h-15 flex items-center justify-between gap-8">
           <Link href="/" aria-label="Kalpa home" className="shrink-0">
@@ -155,9 +158,9 @@ export default function HomePage() {
             onSaved={() => {
               setKeyRequiredSheet(false);
               if (pendingRun) {
-                const { prompt, stack } = pendingRun;
+                const { prompt, stack, engine } = pendingRun;
                 setPendingRun(null);
-                executeProjectLaunch(prompt, stack);
+                executeProjectLaunch(prompt, stack, engine);
               }
             }}
           />

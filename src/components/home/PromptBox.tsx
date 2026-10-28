@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Cpu, KeyRound } from 'lucide-react';
-import type { StackKind } from '@/lib/vfs/db';
+import { ArrowRight, Cloud, Cpu, KeyRound } from 'lucide-react';
+import type { EngineKind, StackKind } from '@/lib/vfs/db';
 import { useProviderStore } from '@/lib/providers/store';
 import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
@@ -20,7 +20,7 @@ const EXAMPLE_IDEAS = [
 ];
 
 export interface PromptBoxProps {
-  onRun: (prompt: string, stack: StackKind) => Promise<void>;
+  onRun: (prompt: string, stack: StackKind, engine: EngineKind) => Promise<void>;
   onOpenModelSheet: () => void;
   running: boolean;
 }
@@ -28,19 +28,21 @@ export interface PromptBoxProps {
 export function PromptBox({ onRun, onOpenModelSheet, running }: PromptBoxProps) {
   const { breakpoint } = useBreakpoint();
   const reduceMotion = useUiStore((s) => s.reduceMotion);
+  const addToast = useUiStore((s) => s.addToast);
   const profiles = useProviderStore((s) => s.profiles);
   const activeProfileId = useProviderStore((s) => s.activeProfileId);
+  const e2bApiKey = useProviderStore((s) => s.e2bApiKey);
 
   const activeProfile =
     profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null;
 
   const [prompt, setPrompt] = useState('');
   const [stack, setStack] = useState<StackKind>('auto');
+  const [engine, setEngine] = useState<EngineKind>('instant');
   const [focused, setFocused] = useState(false);
   const [typedPlaceholder, setTypedPlaceholder] = useState(EXAMPLE_IDEAS[0]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-grow textarea height cleanly
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -48,7 +50,6 @@ export function PromptBox({ onRun, onOpenModelSheet, running }: PromptBoxProps) 
     el.style.height = `${Math.min(280, el.scrollHeight)}px`;
   }, [prompt]);
 
-  // Typewriter cycling placeholder (pauses on focus or reduced motion)
   useEffect(() => {
     if (focused || prompt.length > 0 || reduceMotion) return;
 
@@ -87,10 +88,26 @@ export function PromptBox({ onRun, onOpenModelSheet, running }: PromptBoxProps) 
     return () => clearTimeout(timer);
   }, [focused, prompt.length, reduceMotion]);
 
+  const handleToggleEngine = () => {
+    if (engine === 'instant') {
+      if (!e2bApiKey.trim()) {
+        addToast({
+          title: 'Cloud Sandbox requires an E2B key',
+          description: 'Add your E2B API key in Settings -> Engines to run on a Linux microVM.',
+          kind: 'info',
+        });
+        return;
+      }
+      setEngine('cloud');
+    } else {
+      setEngine('instant');
+    }
+  };
+
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!prompt.trim() || running) return;
-    onRun(prompt.trim(), stack);
+    onRun(prompt.trim(), stack, engine);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -139,10 +156,17 @@ export function PromptBox({ onRun, onOpenModelSheet, running }: PromptBoxProps) 
 
               <Chip
                 active
-                icon={<Cpu className="w-3.5 h-3.5 text-kalpa-success" />}
-                title="Instant browser engine active (Cloud Sandbox coming in Prompt 2)"
+                onClick={handleToggleEngine}
+                icon={
+                  engine === 'cloud' ? (
+                    <Cloud className="w-3.5 h-3.5 text-kalpa-violet" />
+                  ) : (
+                    <Cpu className="w-3.5 h-3.5 text-kalpa-success" />
+                  )
+                }
+                title="Click to switch between Instant browser engine and Cloud Sandbox"
               >
-                Instant
+                {engine === 'cloud' ? 'Cloud Sandbox' : 'Instant'}
               </Chip>
             </div>
 

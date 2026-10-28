@@ -37,6 +37,13 @@ export interface CheckpointRecord {
   tree: Record<string, string>;
 }
 
+export interface TurnFileChange {
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  before: string;
+  after: string;
+}
+
 export interface ChatRecord {
   id: string;
   projectId: string;
@@ -52,6 +59,16 @@ export interface ChatRecord {
     };
     model?: string;
     providerLabel?: string;
+    turnId?: string;
+    beforeCheckpointId?: string;
+    afterCheckpointId?: string;
+    redoCheckpointId?: string;
+    durationMs?: number;
+    filesChanged?: TurnFileChange[];
+    hiddenAutoContinue?: boolean;
+    milestoneNext?: string;
+    stopped?: boolean;
+    plainChat?: boolean;
   };
 }
 

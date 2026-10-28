@@ -1,37 +1,26 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { useUiStore } from '@/stores/ui';
 import { Splitter } from '@/components/ui/Splitter';
 import { Sheet } from '@/components/ui/Sheet';
 import { ModelSwitcherSheet } from '@/components/home/ModelSwitcherSheet';
+import { ChatPanel } from '@/components/agent/ChatPanel';
+import { SandboxStatus } from '@/components/agent/SandboxStatus';
+import { BrainPanel } from '@/components/agent/BrainPanel';
+import { HistorySheet } from '@/components/agent/HistorySheet';
+import { ExportSheet } from '@/components/agent/ExportSheet';
 import { TopBar } from './TopBar';
 import { BottomNav } from './BottomNav';
-import { ChatPanel } from './ChatPanel';
 import { FileTree } from './FileTree';
 import { EditorTabs } from './EditorTabs';
 import { CodeEditor } from './CodeEditor';
 import { PreviewPanel } from './PreviewPanel';
 import { TerminalPanel } from './TerminalPanel';
+import { DEFAULT_SPLITS, IdeSplitters, type SplitSizes } from './IdeSplitters';
 
 const SPLIT_STORAGE_KEY = 'kalpa_ide_splits_v1';
-
-interface SplitSizes {
-  chatPct: number; // desktop default 28
-  codePct: number; // desktop default 38 (preview = 100 - chat - code = 34)
-  termPct: number; // desktop default 32
-  tabletChatPct: number; // tablet default 38
-  tabletTermPx: number; // tablet bottom drawer height default 260
-}
-
-const DEFAULT_SPLITS: SplitSizes = {
-  chatPct: 28,
-  codePct: 38,
-  termPct: 32,
-  tabletChatPct: 38,
-  tabletTermPx: 260,
-};
 
 export function IdeShell() {
   const { breakpoint } = useBreakpoint();
@@ -69,7 +58,6 @@ export function IdeShell() {
     });
   };
 
-  // Compute exact slot styles for the 4 persistent panels so NONE ever unmount across tab/breakpoint changes!
   const hiddenSlot =
     'invisible opacity-0 pointer-events-none z-0 overflow-hidden';
   const activeSlot =
@@ -123,9 +111,10 @@ export function IdeShell() {
 
     codeVis = tabletRightMode === 'code' ? activeSlot : hiddenSlot;
     previewVis = tabletRightMode === 'preview' ? activeSlot : hiddenSlot;
-    termVis = tabletTerminalOpen ? 'visible opacity-100 pointer-events-auto z-30 shadow-kalpa-soft' : hiddenSlot;
+    termVis = tabletTerminalOpen
+      ? 'visible opacity-100 pointer-events-auto z-30 shadow-kalpa-soft'
+      : hiddenSlot;
   } else {
-    // Phone (< 700px): full-screen single active panel
     chatVis = activeIdeTab === 'chat' ? activeSlot : hiddenSlot;
     codeVis = activeIdeTab === 'code' ? activeSlot : hiddenSlot;
     previewVis = activeIdeTab === 'preview' ? activeSlot : hiddenSlot;
@@ -135,9 +124,10 @@ export function IdeShell() {
   return (
     <div className="h-[100dvh] w-full flex flex-col overflow-hidden bg-kalpa-bg">
       <TopBar onOpenModelSheet={() => setModelSheetOpen(true)} />
+      <SandboxStatus />
 
       <main ref={stageRef} className="relative flex-1 min-h-0 w-full overflow-hidden">
-        {/* Persistent Slot 1: Chat */}
+        {/* Persistent Slot 1: Agent Chat */}
         <section
           aria-label="Chat panel"
           style={chatStyle}
@@ -190,125 +180,25 @@ export function IdeShell() {
                   tabletTermPx: Math.max(160, Math.min(540, s.tabletTermPx - dy)),
                 }))
               }
-              onReset={() => updateSplits((s) => ({ ...s, tabletTermPx: DEFAULT_SPLITS.tabletTermPx }))}
+              onReset={() =>
+                updateSplits((s) => ({ ...s, tabletTermPx: DEFAULT_SPLITS.tabletTermPx }))
+              }
             />
           ) : null}
           <TerminalPanel />
         </section>
 
-        {/* Desktop Splitters */}
-        {breakpoint === 'desktop' ? (
-          <>
-            <div
-              style={{ left: `${splits.chatPct}%`, top: 0, bottom: 0 }}
-              className="absolute z-20"
-            >
-              <Splitter
-                orientation="vertical"
-                label="Resize Chat and Code columns"
-                onDelta={(dx) => {
-                  const totalW = stageRef.current?.clientWidth || 1200;
-                  const dPct = (dx / totalW) * 100;
-                  updateSplits((s) => {
-                    const nextChat = Math.max(18, Math.min(48, s.chatPct + dPct));
-                    const diff = nextChat - s.chatPct;
-                    const nextCode = Math.max(22, Math.min(58, s.codePct - diff));
-                    return { ...s, chatPct: nextChat, codePct: nextCode };
-                  });
-                }}
-                onReset={() =>
-                  updateSplits((s) => ({
-                    ...s,
-                    chatPct: DEFAULT_SPLITS.chatPct,
-                    codePct: DEFAULT_SPLITS.codePct,
-                  }))
-                }
-              />
-            </div>
-
-            <div
-              style={{ left: `${splits.chatPct + splits.codePct}%`, top: 0, bottom: 0 }}
-              className="absolute z-20"
-            >
-              <Splitter
-                orientation="vertical"
-                label="Resize Code and Preview columns"
-                onDelta={(dx) => {
-                  const totalW = stageRef.current?.clientWidth || 1200;
-                  const dPct = (dx / totalW) * 100;
-                  updateSplits((s) => {
-                    const maxCode = 100 - s.chatPct - 20;
-                    const nextCode = Math.max(20, Math.min(maxCode, s.codePct + dPct));
-                    return { ...s, codePct: nextCode };
-                  });
-                }}
-                onReset={() =>
-                  updateSplits((s) => ({
-                    ...s,
-                    chatPct: DEFAULT_SPLITS.chatPct,
-                    codePct: DEFAULT_SPLITS.codePct,
-                  }))
-                }
-              />
-            </div>
-
-            {!terminalCollapsed ? (
-              <div
-                style={{
-                  left: `${splits.chatPct + splits.codePct}%`,
-                  right: 0,
-                  bottom: `${splits.termPct}%`,
-                }}
-                className="absolute z-20"
-              >
-                <Splitter
-                  orientation="horizontal"
-                  label="Resize Preview and Terminal height"
-                  onDelta={(dy) => {
-                    const totalH = stageRef.current?.clientHeight || 800;
-                    const dPct = (dy / totalH) * 100;
-                    updateSplits((s) => ({
-                      ...s,
-                      termPct: Math.max(16, Math.min(72, s.termPct - dPct)),
-                    }));
-                  }}
-                  onReset={() =>
-                    updateSplits((s) => ({ ...s, termPct: DEFAULT_SPLITS.termPct }))
-                  }
-                />
-              </div>
-            ) : null}
-          </>
-        ) : null}
-
-        {/* Tablet Column Splitter */}
-        {breakpoint === 'tablet' ? (
-          <div
-            style={{ left: `${splits.tabletChatPct}%`, top: 0, bottom: 0 }}
-            className="absolute z-20"
-          >
-            <Splitter
-              orientation="vertical"
-              label="Resize Chat and Workspace columns"
-              onDelta={(dx) => {
-                const totalW = stageRef.current?.clientWidth || 900;
-                const dPct = (dx / totalW) * 100;
-                updateSplits((s) => ({
-                  ...s,
-                  tabletChatPct: Math.max(26, Math.min(55, s.tabletChatPct + dPct)),
-                }));
-              }}
-              onReset={() =>
-                updateSplits((s) => ({ ...s, tabletChatPct: DEFAULT_SPLITS.tabletChatPct }))
-              }
-            />
-          </div>
-        ) : null}
+        <IdeSplitters
+          breakpoint={breakpoint}
+          splits={splits}
+          terminalCollapsed={terminalCollapsed}
+          stageRef={stageRef}
+          updateSplits={updateSplits}
+        />
       </main>
 
       {breakpoint === 'phone' ? <BottomNav /> : null}
 
-      {/* Phone & Tablet Left Slide-in FileTree Drawer */}
       <Sheet
         open={breakpoint !== 'desktop' && filesDrawerOpen}
         onClose={() => setFilesDrawerOpen(false)}
@@ -325,6 +215,10 @@ export function IdeShell() {
         open={modelSheetOpen}
         onClose={() => setModelSheetOpen(false)}
       />
+
+      <BrainPanel />
+      <HistorySheet />
+      <ExportSheet />
     </div>
   );
 }

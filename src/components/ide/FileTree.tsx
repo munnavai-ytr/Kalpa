@@ -2,6 +2,7 @@
 
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  Brain,
   ChevronDown,
   ChevronRight,
   FileCode,
@@ -12,10 +13,12 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Lock,
   MoreHorizontal,
   Search,
   Upload,
 } from 'lucide-react';
+import { isBrainPath } from '@/lib/brain/caps';
 import { vfs } from '@/lib/vfs/vfs';
 import { isBinaryPath, isImagePath, normalisePath } from '@/lib/vfs/paths';
 import { buildFileTreeRows, type TreeRow } from '@/lib/vfs/fileTreeRows';
@@ -38,7 +41,7 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
   const zipInputRef = useRef<HTMLInputElement>(null);
 
   const [query, setQuery] = useState('');
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['.kalpa']));
   const [scrollTop, setScrollTop] = useState(0);
   const [dialogMode, setDialogMode] = useState<FileTreeDialogMode>(null);
   const [inputVal, setInputVal] = useState('');
@@ -110,12 +113,14 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
     try {
       if (dialogMode.kind === 'new-file') {
         const path = normalisePath(inputVal);
+        if (isBrainPath(path)) throw new Error('Brain files are managed via the Brain panel.');
         await vfs.write(currentProject.id, path, '');
         openFile(path);
         setActiveIdeTab('code');
         onFileChosen?.();
       } else if (dialogMode.kind === 'new-folder') {
         const folder = normalisePath(inputVal);
+        if (isBrainPath(folder)) throw new Error('Reserved folder .kalpa');
         await vfs.write(currentProject.id, `${folder}/.gitkeep`, '');
       } else if (dialogMode.kind === 'rename') {
         await vfs.move(currentProject.id, dialogMode.row.path, normalisePath(inputVal));
@@ -137,7 +142,7 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
   };
 
   const handleDuplicate = async (row: TreeRow) => {
-    if (!currentProject || row.isFolder) return;
+    if (!currentProject || row.isFolder || isBrainPath(row.path)) return;
     const data = await vfs.read(currentProject.id, row.path);
     if (!data) return;
     const dot = row.path.lastIndexOf('.');
@@ -210,7 +215,7 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
         onDrop={async (e) => {
           e.preventDefault();
           const dragged = e.dataTransfer.getData('text/kalpa-path');
-          if (dragged && currentProject && dragged.includes('/')) {
+          if (dragged && !isBrainPath(dragged) && currentProject && dragged.includes('/')) {
             await vfs.move(currentProject.id, dragged, dragged.split('/').pop()!).catch(() => {});
           }
         }}
@@ -221,27 +226,31 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
             const isOpenDir = row.isFolder && !collapsed.has(row.path);
             const isActive = !row.isFolder && activeFilePath === row.path;
             const isDirty = !row.isFolder && dirtyBuffers[row.path] !== undefined;
+            const inBrain = isBrainPath(row.path);
 
             return (
               <div
                 key={row.path}
-                draggable
-                onDragStart={(e) => e.dataTransfer.setData('text/kalpa-path', row.path)}
+                draggable={!inBrain}
+                onDragStart={(e) => {
+                  if (!inBrain) e.dataTransfer.setData('text/kalpa-path', row.path);
+                }}
                 onDragOver={(e) => {
-                  if (row.isFolder) {
+                  if (row.isFolder && !inBrain) {
                     e.preventDefault();
                     e.stopPropagation();
                   }
                 }}
                 onDrop={async (e) => {
-                  if (!row.isFolder || !currentProject) return;
+                  if (!row.isFolder || inBrain || !currentProject) return;
                   e.preventDefault();
                   e.stopPropagation();
                   const src = e.dataTransfer.getData('text/kalpa-path');
-                  if (!src || src === row.path || row.path.startsWith(`${src}/`)) return;
+                  if (!src || isBrainPath(src) || src === row.path || row.path.startsWith(`${src}/`)) return;
                   await vfs.move(currentProject.id, src, `${row.path}/${src.split('/').pop()!}`).catch(() => {});
                 }}
                 onContextMenu={(e) => {
+                  if (inBrain) return;
                   e.preventDefault();
                   setMenuRow({ row, x: e.clientX, y: e.clientY });
                 }}
@@ -271,7 +280,13 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
                   {row.isFolder ? (
                     <>
                       {isOpenDir ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
-                      {isOpenDir ? <FolderOpen className="w-3.5 h-3.5 text-kalpa-gold shrink-0" /> : <Folder className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />}
+                      {row.isBrainFolder ? (
+                        <Brain className="w-3.5 h-3.5 text-kalpa-rose shrink-0" />
+                      ) : isOpenDir ? (
+                        <FolderOpen className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
+                      ) : (
+                        <Folder className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
+                      )}
                     </>
                   ) : isImagePath(row.path) ? (
                     <FileImage className="w-3.5 h-3.5 text-kalpa-gold shrink-0" />
@@ -282,23 +297,30 @@ export function FileTree({ onFileChosen }: { onFileChosen?: () => void }) {
                   ) : (
                     <FileText className="w-3.5 h-3.5 text-kalpa-muted shrink-0" />
                   )}
-                  <span className="truncate font-mono">{row.name}</span>
+                  <span className={`truncate ${row.isBrainFolder ? 'font-semibold text-kalpa-text' : 'font-mono'}`}>
+                    {row.name}
+                  </span>
+                  {row.isReadOnly ? (
+                    <Lock className="w-3 h-3 text-kalpa-muted shrink-0 ml-1" />
+                  ) : null}
                   {isDirty ? (
                     <span aria-label="Unsaved changes" className="w-1.5 h-1.5 rounded-full bg-kalpa-gold shrink-0 ml-1" />
                   ) : null}
                 </button>
 
-                <button
-                  type="button"
-                  aria-label={`Actions for ${row.name}`}
-                  onClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    setMenuRow({ row, x: rect.left, y: rect.bottom });
-                  }}
-                  className="p-1.5 rounded-md opacity-70 sm:opacity-0 sm:group-hover:opacity-100 hover:bg-kalpa-surface-2 cursor-pointer shrink-0"
-                >
-                  <MoreHorizontal className="w-3.5 h-3.5" />
-                </button>
+                {!inBrain ? (
+                  <button
+                    type="button"
+                    aria-label={`Actions for ${row.name}`}
+                    onClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setMenuRow({ row, x: rect.left, y: rect.bottom });
+                    }}
+                    className="p-1.5 rounded-md opacity-70 sm:opacity-0 sm:group-hover:opacity-100 hover:bg-kalpa-surface-2 cursor-pointer shrink-0"
+                  >
+                    <MoreHorizontal className="w-3.5 h-3.5" />
+                  </button>
+                ) : null}
               </div>
             );
           })}

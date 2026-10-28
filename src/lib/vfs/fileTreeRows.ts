@@ -1,3 +1,4 @@
+import { BRAIN_DIR, isBrainPath, isReadOnlyBrainPath } from '@/lib/brain/caps';
 import type { VfsFileMeta } from './vfs';
 
 export interface TreeRow {
@@ -5,6 +6,8 @@ export interface TreeRow {
   name: string;
   depth: number;
   isFolder: boolean;
+  isBrainFolder?: boolean;
+  isReadOnly?: boolean;
 }
 
 export function buildFileTreeRows(
@@ -36,8 +39,9 @@ export function buildFileTreeRows(
         name: p,
         depth: 0,
         isFolder: false,
+        isReadOnly: isReadOnlyBrainPath(p),
       }));
-    return { rows: matched, folders: allFolders };
+    return { rows: matched, folders: allFolders.filter((f) => !isBrainPath(f)) };
   }
 
   const combined: { path: string; isFolder: boolean }[] = [
@@ -46,6 +50,10 @@ export function buildFileTreeRows(
   ];
 
   combined.sort((a, b) => {
+    const aBrain = isBrainPath(a.path);
+    const bBrain = isBrainPath(b.path);
+    if (aBrain !== bBrain) return aBrain ? -1 : 1;
+
     const aParts = a.path.split('/');
     const bParts = b.path.split('/');
     const len = Math.min(aParts.length, bParts.length);
@@ -71,13 +79,16 @@ export function buildFileTreeRows(
       }
     }
     if (!hidden) {
+      const isRootBrain = item.isFolder && item.path === BRAIN_DIR;
       rows.push({
         path: item.path,
-        name: parts[parts.length - 1],
+        name: isRootBrain ? 'Brain' : parts[parts.length - 1],
         depth: parts.length - 1,
         isFolder: item.isFolder,
+        isBrainFolder: isRootBrain,
+        isReadOnly: isReadOnlyBrainPath(item.path),
       });
     }
   }
-  return { rows, folders: allFolders };
+  return { rows, folders: allFolders.filter((f) => !isBrainPath(f)) };
 }

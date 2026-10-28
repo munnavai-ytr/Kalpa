@@ -13,11 +13,12 @@ import { buildFixPromptFromError, parseFileLineFromMessage } from '@/lib/preview
 import { usePreviewStore } from '@/stores/preview';
 import { useProjectStore } from '@/stores/project';
 import { useChatStore } from '@/stores/chat';
+import { useAgentStore } from '@/stores/agent';
 import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { Button } from '@/components/ui/Button';
 
-function SandpackBridge() {
+function SandpackBridge({ projectId }: { projectId: string }) {
   const { breakpoint } = useBreakpoint();
   const { sandpack, listen } = useSandpack();
   const { logs } = useSandpackConsole({ resetOnPreviewRestart: true });
@@ -25,7 +26,9 @@ function SandpackBridge() {
   const setStatus = usePreviewStore((s) => s.setStatus);
   const pushEntry = usePreviewStore((s) => s.pushEntry);
   const openFile = useProjectStore((s) => s.openFile);
+  const sendUserMessage = useChatStore((s) => s.sendUserMessage);
   const setComposerDraft = useChatStore((s) => s.setComposerDraft);
+  const isAgentRunning = useAgentStore((s) => s.isRunning);
   const setActiveIdeTab = useUiStore((s) => s.setActiveIdeTab);
   const addToast = useUiStore((s) => s.addToast);
 
@@ -122,9 +125,13 @@ function SandpackBridge() {
               line,
               time: Date.now(),
             });
-            setComposerDraft(prompt);
             if (breakpoint === 'phone') setActiveIdeTab('chat');
-            addToast({ title: 'Copied error into Chat composer', kind: 'info' });
+            if (isAgentRunning) {
+              setComposerDraft(prompt);
+              addToast({ title: 'Agent busy — copied error into Chat input', kind: 'info' });
+            } else {
+              void sendUserMessage(projectId, prompt);
+            }
           }}
         >
           Ask AI to fix
@@ -160,7 +167,7 @@ export function SandpackStage({ projectId, reloadNonce, bundle }: SandpackStageP
           showOpenInCodeSandbox={false}
           style={{ height: '100%', width: '100%' }}
         />
-        <SandpackBridge />
+        <SandpackBridge projectId={projectId} />
       </SandpackProvider>
     </div>
   );

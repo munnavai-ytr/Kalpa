@@ -89,6 +89,7 @@ interface ProviderStoreState {
   vaultMode: VaultMode;
   vaultLocked: boolean;
   e2bApiKey: string;
+  githubToken: string;
 
   initProviders: () => Promise<void>;
   getActiveProfile: () => ProviderProfile | null;
@@ -99,6 +100,7 @@ interface ProviderStoreState {
   removeProfileKey: (id: string) => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
   setE2bApiKey: (key: string) => Promise<void>;
+  setGithubToken: (token: string) => Promise<void>;
   fetchModels: (cfg: Pick<ProviderConfig, 'kind' | 'baseUrl' | 'apiKey' | 'useProxy'>) => Promise<FetchedModel[]>;
   testConnection: (cfg: ProviderConfig) => Promise<ConnectionTestResult>;
 }
@@ -107,7 +109,8 @@ async function saveAllToStorage(
   profiles: ProviderProfile[],
   activeProfileId: string | null,
   vaultMode: VaultMode,
-  e2bApiKey: string
+  e2bApiKey: string,
+  githubToken: string
 ) {
   const metas: StoredProfileMeta[] = profiles.map(({ apiKey: _omit, ...rest }) => rest);
   await setSetting(PROFILES_META_KEY, metas);
@@ -118,6 +121,7 @@ async function saveAllToStorage(
       profiles.filter((p) => p.apiKey).map((p) => [p.id, p.apiKey])
     ),
     e2bApiKey: e2bApiKey || undefined,
+    githubToken: githubToken || undefined,
   };
   await persistVaultSecrets(vaultMode, secrets, sessionPassphrase);
 }
@@ -129,6 +133,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
   vaultMode: 'device',
   vaultLocked: false,
   e2bApiKey: '',
+  githubToken: '',
 
   initProviders: async () => {
     if (get().initialized) return;
@@ -150,6 +155,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
       vaultMode: vault.mode,
       vaultLocked: vault.locked,
       e2bApiKey: vault.secrets.e2bApiKey ?? '',
+      githubToken: vault.secrets.githubToken ?? '',
     });
   },
 
@@ -165,6 +171,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
     set((s) => ({
       vaultLocked: false,
       e2bApiKey: secrets.e2bApiKey ?? '',
+      githubToken: secrets.githubToken ?? '',
       profiles: s.profiles.map((p) => ({
         ...p,
         apiKey: secrets.keysByProfileId[p.id] ?? '',
@@ -181,8 +188,8 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
     } else {
       sessionPassphrase = undefined;
     }
-    const { profiles, activeProfileId, e2bApiKey } = get();
-    await saveAllToStorage(profiles, activeProfileId, mode, e2bApiKey);
+    const { profiles, activeProfileId, e2bApiKey, githubToken } = get();
+    await saveAllToStorage(profiles, activeProfileId, mode, e2bApiKey, githubToken);
     set({ vaultMode: mode, vaultLocked: false });
   },
 
@@ -206,7 +213,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
     const activeProfileId = get().activeProfileId ?? id;
     set({ profiles, activeProfileId });
     if (!get().vaultLocked) {
-      await saveAllToStorage(profiles, activeProfileId, get().vaultMode, get().e2bApiKey);
+      await saveAllToStorage(profiles, activeProfileId, get().vaultMode, get().e2bApiKey, get().githubToken);
     }
     return full;
   },
@@ -217,7 +224,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
       get().activeProfileId === id ? (profiles[0]?.id ?? null) : get().activeProfileId;
     set({ profiles, activeProfileId });
     if (!get().vaultLocked) {
-      await saveAllToStorage(profiles, activeProfileId, get().vaultMode, get().e2bApiKey);
+      await saveAllToStorage(profiles, activeProfileId, get().vaultMode, get().e2bApiKey, get().githubToken);
     }
   },
 
@@ -225,7 +232,7 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
     const profiles = get().profiles.map((p) => (p.id === id ? { ...p, apiKey: '' } : p));
     set({ profiles });
     if (!get().vaultLocked) {
-      await saveAllToStorage(profiles, get().activeProfileId, get().vaultMode, get().e2bApiKey);
+      await saveAllToStorage(profiles, get().activeProfileId, get().vaultMode, get().e2bApiKey, get().githubToken);
     }
   },
 
@@ -237,7 +244,14 @@ export const useProviderStore = create<ProviderStoreState>((set, get) => ({
   setE2bApiKey: async (e2bApiKey) => {
     set({ e2bApiKey });
     if (!get().vaultLocked) {
-      await saveAllToStorage(get().profiles, get().activeProfileId, get().vaultMode, e2bApiKey);
+      await saveAllToStorage(get().profiles, get().activeProfileId, get().vaultMode, e2bApiKey, get().githubToken);
+    }
+  },
+
+  setGithubToken: async (githubToken) => {
+    set({ githubToken });
+    if (!get().vaultLocked) {
+      await saveAllToStorage(get().profiles, get().activeProfileId, get().vaultMode, get().e2bApiKey, githubToken);
     }
   },
 

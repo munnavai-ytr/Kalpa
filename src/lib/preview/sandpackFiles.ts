@@ -1,4 +1,5 @@
 import type { SandpackPredefinedTemplate } from '@codesandbox/sandpack-react';
+import { filterOutBrainFiles } from '@/lib/brain/caps';
 import type { DetectedProjectType } from './detect';
 import { processTailwindForSandpack } from './tailwindInject';
 import { analyzeNextLiteProject, type UnsupportedNextFeature } from './nextLite/routes';
@@ -83,8 +84,9 @@ function detectReactEntry(paths: string[]): string {
 
 export function buildSandpackBundle(
   projectType: DetectedProjectType,
-  rawSnapshot: Record<string, string>
+  rawSnapshotWithBrain: Record<string, string>
 ): SandpackBundleSpec {
+  const rawSnapshot = filterOutBrainFiles(rawSnapshotWithBrain);
   const tw = processTailwindForSandpack(rawSnapshot);
   const cleaned = tw.cleanedFiles;
   const allPaths = Object.keys(cleaned).filter((p) => !p.endsWith('/.gitkeep'));

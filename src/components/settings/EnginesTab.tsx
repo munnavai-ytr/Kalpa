@@ -1,7 +1,16 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Cloud, Cpu, Eye, EyeOff } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Cloud,
+  Cpu,
+  Eye,
+  EyeOff,
+  Play,
+} from 'lucide-react';
+import { runE2bSelfTest, type E2bSelfTestStep } from '@/lib/sandbox/e2b';
 import { useProviderStore } from '@/lib/providers/store';
 import { useUiStore } from '@/stores/ui';
 import { Card } from '@/components/ui/Card';
@@ -14,11 +23,45 @@ export function EnginesTab() {
 
   const [draftKey, setDraftKey] = useState(e2bApiKey);
   const [reveal, setReveal] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    totalMs: number;
+    steps: E2bSelfTestStep[];
+    error?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setDraftKey(e2bApiKey);
+  }, [e2bApiKey]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     await setE2bApiKey(draftKey.trim());
-    addToast({ title: 'Cloud Sandbox key updated', kind: 'success' });
+    addToast({ title: 'Cloud Sandbox E2B key saved in local vault', kind: 'success' });
+  };
+
+  const handleSelfTest = async () => {
+    const key = draftKey.trim();
+    if (!key) {
+      addToast({ title: 'Enter an E2B API key first', kind: 'warn' });
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      if (key !== e2bApiKey) {
+        await setE2bApiKey(key);
+      }
+      const res = await runE2bSelfTest(key);
+      setTestResult(res);
+      addToast({
+        title: res.ok ? `E2B Sandbox verified (${res.totalMs} ms)` : 'E2B Sandbox test failed',
+        kind: res.ok ? 'success' : 'error',
+      });
+    } finally {
+      setTesting(false);
+    }
   };
 
   return (
@@ -26,7 +69,7 @@ export function EnginesTab() {
       <Card className="space-y-3">
         <div className="flex items-center gap-2.5">
           <Cpu className="w-4 h-4 text-kalpa-success shrink-0" />
-          <h3 className="text-sm font-semibold text-kalpa-text">Engine A: Instant (Active)</h3>
+          <h3 className="text-sm font-semibold text-kalpa-text">Engine A: Instant (Browser Runtime)</h3>
         </div>
         <p className="text-sm text-kalpa-muted leading-relaxed">
           Runs 100% inside your browser with zero server setup or sandbox fees. Instant supports
@@ -35,10 +78,9 @@ export function EnginesTab() {
           worker scripts.
         </p>
         <div className="pt-1 text-xs text-kalpa-muted space-y-1">
-          <p className="font-medium text-kalpa-text">Plain-language limits of Instant:</p>
-          <p>· Server-only Next.js features (API routes, Server Actions, async Server Components) require a real Linux server.</p>
-          <p>· Terminal commands like npm, git, docker, or native C/Rust compilers cannot run in browser WebAssembly.</p>
-          <p>· Python micropip installs pure-Python wheels only.</p>
+          <p className="font-medium text-kalpa-text">When to switch to Cloud Sandbox:</p>
+          <p>· Server-only Next.js features (API routes, Server Actions, async Server Components, middleware).</p>
+          <p>· Full Linux CLI tools (npm, git, pytest, cargo, native compilers) and real interactive PTY.</p>
         </div>
       </Card>
 
@@ -47,17 +89,23 @@ export function EnginesTab() {
           <div className="flex items-center gap-2.5">
             <Cloud className="w-4 h-4 text-kalpa-violet shrink-0" />
             <h3 className="text-sm font-semibold text-kalpa-text">
-              Cloud Sandbox (E2B) · Coming in the next step
+              Engine B: Cloud Sandbox (E2B Linux microVM)
             </h3>
           </div>
+          {e2bApiKey ? (
+            <span className="text-xs font-mono text-kalpa-success">Key configured</span>
+          ) : null}
         </div>
+
         <p className="text-sm text-kalpa-muted leading-relaxed">
-          Real Linux microVMs for full Next.js servers, npm/git/docker, and real PTY terminals will
-          plug in during Prompt 2. You can pre-save your E2B API key in the same local browser vault now.
+          Boots an isolated Ubuntu Linux microVM directly from your browser using your own E2B key.
+          Your local IndexedDB Virtual File System remains the single source of truth; changes sync
+          both ways automatically.
         </p>
+
         <form onSubmit={handleSave} className="space-y-3">
           <label className="block text-xs font-medium text-kalpa-muted">
-            Cloud Sandbox key (E2B) - used in the next step
+            E2B API Key (stored only in your browser vault)
           </label>
           <div className="flex flex-col sm:flex-row gap-2">
             <div className="relative flex-1">
@@ -79,10 +127,53 @@ export function EnginesTab() {
               </button>
             </div>
             <Button type="submit" variant="secondary">
-              Save E2B Key
+              Save Key
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              loading={testing}
+              leftIcon={<Play className="w-3.5 h-3.5" />}
+              onClick={handleSelfTest}
+            >
+              Test Connection
             </Button>
           </div>
         </form>
+
+        {testResult ? (
+          <div className="rounded-[12px] border border-kalpa-border bg-kalpa-bg p-3.5 space-y-2 text-xs">
+            <div className="flex items-center justify-between font-semibold">
+              <span className={testResult.ok ? 'text-kalpa-success' : 'text-kalpa-danger'}>
+                {testResult.ok
+                  ? 'All Cloud Sandbox probes passed'
+                  : `Sandbox check failed: ${testResult.error || 'see steps below'}`}
+              </span>
+              <span className="font-mono text-kalpa-muted">{testResult.totalMs} ms</span>
+            </div>
+
+            <div className="divide-y divide-kalpa-border">
+              {testResult.steps.map((s) => (
+                <div key={s.step} className="py-2 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    {s.ok ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-kalpa-success shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-3.5 h-3.5 text-kalpa-danger shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-medium text-kalpa-text">{s.step}</p>
+                      <p className="font-mono text-[11px] text-kalpa-muted truncate">{s.detail}</p>
+                    </div>
+                  </div>
+                  <span className="font-mono text-[11px] text-kalpa-muted shrink-0">
+                    {s.ms} ms
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </Card>
     </div>
   );

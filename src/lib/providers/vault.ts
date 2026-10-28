@@ -12,6 +12,7 @@ export interface EncryptedEnvelope {
 export interface SecretBundle {
   keysByProfileId: Record<string, string>;
   e2bApiKey?: string;
+  githubToken?: string;
 }
 
 const VAULT_MODE_KEY = 'vault_mode';

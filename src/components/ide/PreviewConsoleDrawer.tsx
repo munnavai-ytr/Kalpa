@@ -3,15 +3,20 @@
 import React from 'react';
 import { buildFixPromptFromError } from '@/lib/preview/errors';
 import { usePreviewStore } from '@/stores/preview';
+import { useProjectStore } from '@/stores/project';
 import { useChatStore } from '@/stores/chat';
+import { useAgentStore } from '@/stores/agent';
 import { useUiStore } from '@/stores/ui';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
 
 export function PreviewConsoleDrawer() {
   const { breakpoint } = useBreakpoint();
+  const currentProject = useProjectStore((s) => s.currentProject);
   const entries = usePreviewStore((s) => s.entries);
   const clearEntries = usePreviewStore((s) => s.clearEntries);
+  const sendUserMessage = useChatStore((s) => s.sendUserMessage);
   const setComposerDraft = useChatStore((s) => s.setComposerDraft);
+  const isAgentRunning = useAgentStore((s) => s.isRunning);
   const setActiveIdeTab = useUiStore((s) => s.setActiveIdeTab);
 
   return (
@@ -46,8 +51,13 @@ export function PreviewConsoleDrawer() {
                 <button
                   type="button"
                   onClick={() => {
-                    setComposerDraft(buildFixPromptFromError(e));
+                    const prompt = buildFixPromptFromError(e);
                     if (breakpoint === 'phone') setActiveIdeTab('chat');
+                    if (isAgentRunning || !currentProject) {
+                      setComposerDraft(prompt);
+                    } else {
+                      void sendUserMessage(currentProject.id, prompt);
+                    }
                   }}
                   className="text-[11px] text-kalpa-violet hover:underline shrink-0 cursor-pointer"
                 >

@@ -40,7 +40,9 @@ export async function runSingleShellCommand(
   const push = (l: string) => out.push(l);
 
   if (CLOUD_ONLY_COMMANDS.has(cmd)) {
-    ctx.printErr('This command needs the Cloud Sandbox (real Linux). Coming in the next step.');
+    ctx.printErr(
+      `Command "${cmd}" needs the Cloud Sandbox (real Linux). Switch Engine to Cloud in the top bar or add an E2B key in Settings -> Engines.`
+    );
     return { output: [], ok: false };
   }
 

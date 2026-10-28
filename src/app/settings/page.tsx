@@ -7,16 +7,27 @@ import { Logo } from '@/components/brand/Logo';
 import { AuroraBackground } from '@/components/brand/AuroraBackground';
 import { Tabs, type TabOption } from '@/components/ui/Tabs';
 import { ProvidersTab } from '@/components/settings/ProvidersTab';
+import { AgentTab } from '@/components/settings/AgentTab';
 import { EnginesTab } from '@/components/settings/EnginesTab';
+import { ExportTab } from '@/components/settings/ExportTab';
 import { AppearanceTab } from '@/components/settings/AppearanceTab';
 import { DataTab } from '@/components/settings/DataTab';
 import { PrivacyTab } from '@/components/settings/PrivacyTab';
 
-type SettingsSection = 'providers' | 'engines' | 'appearance' | 'data' | 'privacy';
+type SettingsSection =
+  | 'providers'
+  | 'agent'
+  | 'engines'
+  | 'export'
+  | 'appearance'
+  | 'data'
+  | 'privacy';
 
 const TABS: TabOption<SettingsSection>[] = [
   { id: 'providers', label: 'AI Providers' },
+  { id: 'agent', label: 'Agent' },
   { id: 'engines', label: 'Engines' },
+  { id: 'export', label: 'Export' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'data', label: 'Data' },
   { id: 'privacy', label: 'Privacy' },
@@ -56,15 +67,19 @@ export default function SettingsPage() {
             Settings
           </h1>
           <p className="text-sm text-kalpa-muted">
-            Configure BYOK model providers, execution engines, appearance, and browser storage.
+            Configure BYOK model providers, agent behavior, execution engines, GitHub export, and browser storage.
           </p>
         </div>
 
-        <Tabs tabs={TABS} value={tab} onChange={setTab} />
+        <div className="overflow-x-auto pb-1">
+          <Tabs tabs={TABS} value={tab} onChange={setTab} />
+        </div>
 
         <div>
           {tab === 'providers' ? <ProvidersTab /> : null}
+          {tab === 'agent' ? <AgentTab /> : null}
           {tab === 'engines' ? <EnginesTab /> : null}
+          {tab === 'export' ? <ExportTab /> : null}
           {tab === 'appearance' ? <AppearanceTab /> : null}
           {tab === 'data' ? <DataTab /> : null}
           {tab === 'privacy' ? <PrivacyTab /> : null}

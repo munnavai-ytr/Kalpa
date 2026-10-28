@@ -1,3 +1,5 @@
+import { isBrainPath } from '@/lib/brain/caps';
+
 export type DetectedProjectType =
   | 'next'
   | 'react'
@@ -11,7 +13,7 @@ export type DetectedProjectType =
   | 'unknown';
 
 export function detectProjectType(files: Record<string, string>): DetectedProjectType {
-  const paths = Object.keys(files).filter((p) => !p.endsWith('/.gitkeep'));
+  const paths = Object.keys(files).filter((p) => !p.endsWith('/.gitkeep') && !isBrainPath(p));
   if (paths.length === 0) return 'unknown';
 
   let deps: Record<string, string> = {};

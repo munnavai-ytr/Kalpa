@@ -4,7 +4,12 @@ import { create } from 'zustand';
 import { getKalpaDB, type EngineKind } from '@/lib/vfs/db';
 import { useProviderStore } from '@/lib/providers/store';
 import { useTerminalStore } from '@/stores/terminal';
-import { CloudDevServerController, type DevServerState } from '@/lib/sandbox/devServer';
+import {
+  CloudDevServerController,
+  type DevServerStartOptions,
+  type DevServerStartResult,
+  type DevServerState,
+} from '@/lib/sandbox/devServer';
 import { createE2bSandboxSession } from '@/lib/sandbox/e2b';
 import type { SandboxSession } from '@/lib/sandbox/provider';
 import { createDebouncedVfsSync, syncFullVfsToSandbox } from '@/lib/sandbox/sync';
@@ -16,6 +21,12 @@ export type CloudConnectionState =
   | 'expired'
   | 'error';
 
+export interface CloudBeaconError {
+  message: string;
+  source?: string;
+  line?: number;
+}
+
 interface SandboxStoreState {
   engine: EngineKind;
   projectId: string | null;
@@ -25,11 +36,16 @@ interface SandboxStoreState {
   expiresAt: number | null;
   remainingMs: number;
   errorMessage: string | null;
+  userSelectedCloud: boolean;
 
   devServerStatus: DevServerState;
   devServerPort: number;
   devServerUrl: string | null;
   devServerLogTail: string;
+  hostProbeOk: boolean;
+  hostBlockedMessage: string | null;
+  cloudBeaconErrors: CloudBeaconError[];
+  cloudBlankScreen: boolean;
 
   syncEngineFromProject: (projectId: string, engine: EngineKind) => void;
   switchEngine: (projectId: string, nextEngine: EngineKind) => Promise<boolean>;
@@ -38,7 +54,17 @@ interface SandboxStoreState {
   extendCloud: (addMs?: number) => Promise<void>;
   recreateCloud: (projectId: string) => Promise<void>;
   runDevServer: (projectId: string, forceInstall?: boolean) => Promise<void>;
+  startDevServerCommand: (
+    projectId: string,
+    opts?: Omit<DevServerStartOptions, 'onTerminalEcho'>
+  ) => Promise<DevServerStartResult>;
+  ensureDevServerRunning: (projectId: string) => Promise<DevServerStartResult | null>;
+  getLastDevServerOverride: () => { command?: string; port?: number } | null;
+  probeActiveHost: () => Promise<{ ok: boolean; blockedMessage: string | null }>;
   stopDevServer: () => Promise<void>;
+  pushCloudBeaconError: (err: CloudBeaconError) => void;
+  setCloudBlankScreen: (blank: boolean) => void;
+  clearCloudRuntimeSignals: () => void;
 }
 
 let countdownInterval: ReturnType<typeof setInterval> | null = null;
@@ -65,18 +91,23 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
   expiresAt: null,
   remainingMs: 0,
   errorMessage: null,
+  userSelectedCloud: false,
 
   devServerStatus: 'stopped',
   devServerPort: 3000,
   devServerUrl: null,
   devServerLogTail: '',
+  hostProbeOk: false,
+  hostBlockedMessage: null,
+  cloudBeaconErrors: [],
+  cloudBlankScreen: false,
 
   syncEngineFromProject: (projectId, engine) => {
     const prevPid = get().projectId;
     if (prevPid && prevPid !== projectId && get().session) {
       void get().disconnectCloud();
     }
-    set({ projectId, engine });
+    set({ projectId, engine, userSelectedCloud: engine === 'cloud' });
     if (engine === 'cloud' && get().status === 'disconnected') {
       const key = useProviderStore.getState().e2bApiKey;
       if (key) {
@@ -96,7 +127,7 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
 
     if (nextEngine === 'instant') {
       await get().disconnectCloud();
-      set({ engine: 'instant', projectId, errorMessage: null });
+      set({ engine: 'instant', projectId, errorMessage: null, userSelectedCloud: false });
       return true;
     }
 
@@ -104,12 +135,13 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
     if (!e2bKey.trim()) {
       set({
         engine: 'instant',
+        userSelectedCloud: false,
         errorMessage: 'Add your E2B API key in Settings -> Engines to enable Cloud Sandbox.',
       });
       return false;
     }
 
-    set({ engine: 'cloud', projectId });
+    set({ engine: 'cloud', projectId, userSelectedCloud: true });
     const session = await get().connectCloud(projectId);
     return Boolean(session);
   },
@@ -117,10 +149,7 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
   connectCloud: async (projectId) => {
     const e2bKey = useProviderStore.getState().e2bApiKey;
     if (!e2bKey.trim()) {
-      set({
-        status: 'error',
-        errorMessage: 'E2B API key is not configured.',
-      });
+      set({ status: 'error', errorMessage: 'E2B API key is not configured.' });
       return null;
     }
 
@@ -142,6 +171,10 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
       devServerStatus: 'stopped',
       devServerUrl: null,
       devServerLogTail: '',
+      hostProbeOk: false,
+      hostBlockedMessage: null,
+      cloudBeaconErrors: [],
+      cloudBlankScreen: false,
     });
 
     try {
@@ -155,6 +188,8 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
           devServerPort: devController.port,
           devServerUrl: devController.previewUrl,
           devServerLogTail: devController.getLogTail(40),
+          hostProbeOk: devController.hostProbeOk,
+          hostBlockedMessage: devController.hostBlockedMessage,
         });
       });
 
@@ -165,6 +200,7 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
         onPackageJsonChanged: () => {
           const curSession = get().session;
           if (curSession && devController) {
+            set({ cloudBeaconErrors: [], cloudBlankScreen: false });
             void devController.startOrRestart(projectId, curSession, {
               forceInstall: true,
               onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
@@ -179,12 +215,16 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
         const rem = Math.max(0, exp - Date.now());
         if (rem <= 0) {
           clearTimersAndWatchers();
+          if (devController) {
+            void devController.stop().catch(() => {});
+          }
           set({
             status: 'expired',
             session: null,
             remainingMs: 0,
             devServerStatus: 'stopped',
             devServerUrl: null,
+            hostProbeOk: false,
           });
         } else {
           set({ remainingMs: rem });
@@ -200,7 +240,7 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
         remainingMs: Math.max(0, session.expiresAt - Date.now()),
       });
 
-      // Automatically start dev server if project has runnable web files
+      // A6(a): Automatically start dev server on connect if runnable web files exist
       void devController.startOrRestart(projectId, session, {
         onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
       });
@@ -238,6 +278,10 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
       devServerStatus: 'stopped',
       devServerUrl: null,
       devServerLogTail: '',
+      hostProbeOk: false,
+      hostBlockedMessage: null,
+      cloudBeaconErrors: [],
+      cloudBlankScreen: false,
     });
   },
 
@@ -258,10 +302,72 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
   runDevServer: async (projectId, forceInstall = false) => {
     const session = get().session;
     if (!session || !devController) return;
+    set({ cloudBeaconErrors: [], cloudBlankScreen: false });
     await devController.startOrRestart(projectId, session, {
       forceInstall,
       onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
     });
+  },
+
+  startDevServerCommand: async (projectId, opts) => {
+    const session = get().session;
+    if (!session || !devController) {
+      return {
+        status: 'crashed',
+        port: opts?.port ?? 3000,
+        url: null,
+        logTail: 'Cloud Sandbox session is not connected.',
+        hostBlockedMessage: null,
+      };
+    }
+    set({ cloudBeaconErrors: [], cloudBlankScreen: false });
+    return devController.startOrRestart(projectId, session, {
+      ...opts,
+      onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
+    });
+  },
+
+  ensureDevServerRunning: async (projectId) => {
+    const state = get();
+    if (state.status !== 'connected' || !state.session || !devController) return null;
+    if (
+      state.devServerStatus === 'running' ||
+      state.devServerStatus === 'installing' ||
+      state.devServerStatus === 'starting'
+    ) {
+      return null;
+    }
+    set({ cloudBeaconErrors: [], cloudBlankScreen: false });
+    return devController.startOrRestart(projectId, state.session, {
+      onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
+    });
+  },
+
+  getLastDevServerOverride: () => devController?.getLastOverride() ?? null,
+
+  probeActiveHost: async () => {
+    const state = get();
+    if (!state.session || !devController || state.devServerStatus !== 'running' || !state.devServerUrl) {
+      return { ok: state.hostProbeOk, blockedMessage: state.hostBlockedMessage };
+    }
+    try {
+      const host = new URL(state.devServerUrl).host;
+      const res = await devController.probeHostOnce(state.session, state.devServerPort, host);
+      const blocked =
+        Boolean(res.blockedHost) || res.httpCode === 403 || res.httpCode === 421;
+      if (blocked) {
+        const msg =
+          res.bodyHead.trim() ||
+          `Blocked request. Host "${host}" rejected with HTTP ${res.httpCode}.`;
+        set({ hostProbeOk: false, hostBlockedMessage: msg });
+        return { ok: false, blockedMessage: msg };
+      }
+      const ok = res.httpCode >= 200 && res.httpCode < 500;
+      set({ hostProbeOk: ok, hostBlockedMessage: null });
+      return { ok, blockedMessage: null };
+    } catch {
+      return { ok: state.hostProbeOk, blockedMessage: state.hostBlockedMessage };
+    }
   },
 
   stopDevServer: async () => {
@@ -269,4 +375,13 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
       await devController.stop();
     }
   },
+
+  pushCloudBeaconError: (err) =>
+    set((s) => ({
+      cloudBeaconErrors: [...s.cloudBeaconErrors.slice(-19), err],
+    })),
+
+  setCloudBlankScreen: (cloudBlankScreen) => set({ cloudBlankScreen }),
+
+  clearCloudRuntimeSignals: () => set({ cloudBeaconErrors: [], cloudBlankScreen: false }),
 }));

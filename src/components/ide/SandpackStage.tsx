@@ -47,7 +47,7 @@ function SandpackBridge({ projectId, bundle }: SandpackBridgeProps) {
     expectedHashRef.current = bundle.expectedFilesHash;
   }, [bundle.expectedFilesHash]);
 
-  // C5: Debounced content-only updates without remounting SandpackProvider
+  // C5 + B2(c): Debounced content-only updates without remounting or re-entering building for an already-built hash
   useEffect(() => {
     if (isFirstMountRef.current) {
       isFirstMountRef.current = false;
@@ -64,15 +64,21 @@ function SandpackBridge({ projectId, bundle }: SandpackBridgeProps) {
     prevFilesRef.current = bundle.files;
     if (Object.keys(changed).length === 0) return;
 
-    setStatus('building');
+    const previewState = usePreviewStore.getState();
+    if (previewState.lastReadyFilesHash !== bundle.expectedFilesHash) {
+      setStatus('building');
+    }
     const timer = setTimeout(() => {
       sandpack.updateFile(changed);
     }, 250);
     return () => clearTimeout(timer);
-  }, [bundle.files, sandpack, setStatus]);
+  }, [bundle.expectedFilesHash, bundle.files, sandpack, setStatus]);
 
   useEffect(() => {
-    setStatus('building');
+    const previewState = usePreviewStore.getState();
+    if (previewState.lastReadyFilesHash !== expectedHashRef.current) {
+      setStatus('building');
+    }
     const unsub = listen((msg: any) => {
       if (msg.type === 'done' && !msg.compilatonError) {
         markPreviewReady(expectedHashRef.current);

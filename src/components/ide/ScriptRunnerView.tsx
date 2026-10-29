@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Play, Square } from 'lucide-react';
 import { runPythonInWorker, terminateActivePythonRun } from '@/lib/runtime/pyodideWorker';
 import { runJsInWorker, terminateActiveJsRun } from '@/lib/runtime/jsWorker';
@@ -15,6 +15,7 @@ export interface ScriptRunnerViewProps {
   snapshot: Record<string, string>;
   activeFilePath: string | null;
   entryFile?: string;
+  autoRunKey?: string;
 }
 
 export function ScriptRunnerView({
@@ -23,6 +24,7 @@ export function ScriptRunnerView({
   snapshot,
   activeFilePath,
   entryFile,
+  autoRunKey,
 }: ScriptRunnerViewProps) {
   const setStatus = usePreviewStore((s) => s.setStatus);
   const writeTerminalLine = useTerminalStore((s) => s.writeLine);
@@ -39,71 +41,102 @@ export function ScriptRunnerView({
   const [scriptLines, setScriptLines] = useState<{ text: string; err?: boolean }[]>([]);
   const [scriptDuration, setScriptDuration] = useState<number | null>(null);
 
+  const snapshotRef = useRef(snapshot);
+  const runningRef = useRef(false);
+  const lastAutoRunKeyRef = useRef('');
+
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
+
   const selectedScript =
     (activeFilePath && scriptFiles.includes(activeFilePath) ? activeFilePath : null) ??
     (entryFile && scriptFiles.includes(entryFile) ? entryFile : null) ??
     (scriptFiles.includes('main.py') ? 'main.py' : scriptFiles[0] ?? '');
 
-  const handleRunScript = async () => {
-    if (!selectedScript || runningScript) return;
-    setRunningScript(true);
-    setScriptLines([]);
-    setScriptDuration(null);
-    setStatus('building');
+  const executeScript = useCallback(
+    async (targetFile: string) => {
+      if (!targetFile || runningRef.current) return;
+      runningRef.current = true;
+      setRunningScript(true);
+      setScriptLines([]);
+      setScriptDuration(null);
+      setStatus('building');
 
-    const appendOut = (line: string, isErr = false) => {
-      setScriptLines((prev) => [...prev, { text: line, err: isErr }]);
-      writeTerminalLine(line, isErr ? 'stderr' : 'stdout');
-    };
+      const currentFiles = snapshotRef.current;
+      const appendOut = (line: string, isErr = false) => {
+        setScriptLines((prev) => [...prev, { text: line, err: isErr }]);
+        writeTerminalLine(line, isErr ? 'stderr' : 'stdout');
+      };
 
-    if (projectType === 'python') {
-      const res = await runPythonInWorker({
-        file: selectedScript,
-        files: snapshot,
-        onStdout: (l) => appendOut(l, false),
-        onStderr: (l) => appendOut(l, true),
-        onStatus: (m) => appendOut(m, false),
-      });
-      setScriptDuration(res.durationMs);
-      if (!res.ok && res.error) {
-        appendOut(res.error, true);
-        setStatus('error');
-      } else {
-        setStatus('ready');
-        if (res.updatedFiles) {
-          const diffs = Object.entries(res.updatedFiles).filter(([k, v]) => snapshot[k] !== v);
-          if (diffs.length > 0) {
-            await vfs.writeMany(
-              projectId,
-              diffs.map(([path, content]) => ({ path, content, encoding: 'utf8' }))
-            );
+      try {
+        if (projectType === 'python') {
+          const res = await runPythonInWorker({
+            file: targetFile,
+            files: currentFiles,
+            onStdout: (l) => appendOut(l, false),
+            onStderr: (l) => appendOut(l, true),
+            onStatus: (m) => appendOut(m, false),
+          });
+          setScriptDuration(res.durationMs);
+          if (!res.ok && res.error) {
+            appendOut(res.error, true);
+            setStatus('error');
+          } else {
+            setStatus('ready');
+            if (res.updatedFiles) {
+              const diffs = Object.entries(res.updatedFiles).filter(
+                ([k, v]) => currentFiles[k] !== v
+              );
+              if (diffs.length > 0) {
+                await vfs.writeMany(
+                  projectId,
+                  diffs.map(([path, content]) => ({ path, content, encoding: 'utf8' }))
+                );
+              }
+            }
+          }
+        } else {
+          const res = await runJsInWorker({
+            entryFile: targetFile,
+            files: currentFiles,
+            onStdout: (l) => appendOut(l, false),
+            onStderr: (l) => appendOut(l, true),
+          });
+          setScriptDuration(res.durationMs);
+          if (!res.ok && res.error) {
+            appendOut(res.error, true);
+            setStatus('error');
+          } else {
+            setStatus('ready');
           }
         }
+      } finally {
+        runningRef.current = false;
+        setRunningScript(false);
       }
-    } else {
-      const res = await runJsInWorker({
-        entryFile: selectedScript,
-        files: snapshot,
-        onStdout: (l) => appendOut(l, false),
-        onStderr: (l) => appendOut(l, true),
-      });
-      setScriptDuration(res.durationMs);
-      if (!res.ok && res.error) {
-        appendOut(res.error, true);
-        setStatus('error');
-      } else {
-        setStatus('ready');
-      }
-    }
-    setRunningScript(false);
-  };
+    },
+    [projectId, projectType, setStatus, writeTerminalLine]
+  );
+
+  // B4: Auto-run Python entry file once on project open and after every successful milestone
+  useEffect(() => {
+    if (projectType !== 'python' || !autoRunKey || !selectedScript) return;
+    if (lastAutoRunKeyRef.current === autoRunKey) return;
+    lastAutoRunKeyRef.current = autoRunKey;
+    const entryToRun =
+      entryFile && snapshotRef.current[entryFile] !== undefined ? entryFile : selectedScript;
+    void executeScript(entryToRun);
+  }, [autoRunKey, entryFile, executeScript, projectType, selectedScript]);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col p-4 gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-[12px] bg-kalpa-bg-2 border border-kalpa-border">
         <div className="min-w-0">
           <p className="text-xs font-semibold text-kalpa-text">
-            {projectType === 'python' ? 'Python WebAssembly Runner (Pyodide)' : 'JavaScript Worker Runner'}
+            {projectType === 'python'
+              ? 'Python WebAssembly Runner (Pyodide)'
+              : 'JavaScript Worker Runner'}
           </p>
           <p className="text-[11px] font-mono text-kalpa-muted truncate">
             Entry: {selectedScript || '(none)'}
@@ -127,7 +160,7 @@ export function ScriptRunnerView({
             size="sm"
             variant="primary"
             leftIcon={<Play className="w-3.5 h-3.5 fill-current" />}
-            onClick={handleRunScript}
+            onClick={() => void executeScript(selectedScript)}
           >
             Run {selectedScript}
           </Button>
@@ -137,7 +170,8 @@ export function ScriptRunnerView({
       <div className="flex-1 min-h-0 rounded-[12px] bg-kalpa-bg-2 border border-kalpa-border p-3.5 overflow-y-auto font-mono text-xs space-y-1">
         {scriptLines.length === 0 ? (
           <p className="text-kalpa-muted">
-            Click Run to execute <span className="text-kalpa-text">{selectedScript}</span>. Output also streams to the Terminal.
+            {runningScript ? 'Executing ' : 'Click Run to execute '}
+            <span className="text-kalpa-text">{selectedScript}</span>. Output also streams to the Terminal.
           </p>
         ) : (
           scriptLines.map((line, i) => (

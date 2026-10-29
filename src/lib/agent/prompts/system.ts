@@ -21,10 +21,17 @@ export function environmentBlock(opts: {
   const today = new Date().toISOString().slice(0, 10);
   const lang = detectUserLanguage(opts.userText);
   const effectiveMode = opts.mode === 'PLAN' ? 'CHANGE' : opts.mode;
-  const stackLine =
-    opts.preferredStack && opts.preferredStack !== 'auto'
-      ? `\npreferred_stack: ${opts.preferredStack}`
+  const isAutoStack = !opts.preferredStack || opts.preferredStack === 'auto';
+  const stackLine = !isAutoStack ? `\npreferred_stack: ${opts.preferredStack}` : '';
+  const stackPolicyLine =
+    opts.mode === 'NEW_PROJECT' && isAutoStack
+      ? isCloud
+        ? '\nstack_policy: any stack is allowed; prefer Next.js or Vite by the request.'
+        : '\nstack_policy: choose React + Vite + TypeScript + Tailwind v3 (or plain HTML/CSS/JS for simple pages). Do NOT choose Next.js unless the user asks for it. Use only packages that work in the browser (no Node-only, no native modules).'
       : '';
+  const languageRuleLine = !isCloud
+    ? '\ninstant_language_rule: If the user asks for a language the Instant engine cannot run, ask ONE question offering: (1) connect Cloud Sandbox, (2) implement it in Python/JavaScript instead.'
+    : '';
 
   return `<environment>
 engine: ${isCloud ? 'cloud' : 'instant'}
@@ -45,12 +52,12 @@ server_code_in_preview: ${
 tailwind: ${
     isCloud
       ? 'any'
-      : 'tailwind-v3-or-cdn-in-instant (avoid @import "tailwindcss" v4 syntax in Instant)'
+      : 'tailwind-v3-or-v4-in-instant (prefer Tailwind v3 for new Instant projects)'
   }
 file_limits: max 2MB per file, max 2000 files, paths relative to project root, never touch .kalpa/ directly
 user_language: ${lang}
 today: ${today}
-mode: ${effectiveMode}${stackLine}
+mode: ${effectiveMode}${stackLine}${stackPolicyLine}${languageRuleLine}
 </environment>`;
 }
 

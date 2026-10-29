@@ -1,10 +1,16 @@
 import type { SandpackPredefinedTemplate } from '@codesandbox/sandpack-react';
 import { filesHash, fnv1a, rewriteForSandpack } from '@/lib/agent/reliability';
 import { filterOutBrainFiles } from '@/lib/brain/caps';
-import { processTailwindForSandpack } from './tailwindInject';
+import {
+  buildTailwindHeadTags,
+  processTailwindForSandpack,
+  type TailwindRuntimeVersion,
+} from './tailwindInject';
 import { analyzeNextLiteProject, type UnsupportedNextFeature } from './nextLite/routes';
 import { buildNextLiteShimFiles } from './nextLite/shims';
 import { buildNextLiteEntryCode } from './nextLite/entry';
+
+export type SandpackStackKind = 'react' | 'next-lite' | 'vue' | 'svelte' | 'solid' | 'angular';
 
 export interface SandpackBundleSpec {
   template: SandpackPredefinedTemplate;
@@ -12,6 +18,7 @@ export interface SandpackBundleSpec {
   entryFile: string;
   structuralHash: string;
   expectedFilesHash: string;
+  tailwindRuntime: TailwindRuntimeVersion;
   hasTailwindV4Warning: boolean;
   unsupportedNextFeatures: UnsupportedNextFeature[];
 }
@@ -97,7 +104,7 @@ if (ResolvedApp) {
 }
 
 export function buildSandpackBundle(
-  projectType: 'react' | 'next-lite',
+  projectType: SandpackStackKind,
   rawSnapshotWithBrain: Record<string, string>
 ): SandpackBundleSpec {
   const rawSnapshot = filterOutBrainFiles(rawSnapshotWithBrain);
@@ -110,7 +117,21 @@ export function buildSandpackBundle(
   const isNextLite = projectType === 'next-lite';
   const nextAnalysis = isNextLite ? analyzeNextLiteProject(aliasRewritten) : null;
 
-  const template: SandpackPredefinedTemplate = isNextLite || hasTs ? 'react-ts' : 'react';
+  const template: SandpackPredefinedTemplate =
+    projectType === 'vue'
+      ? hasTs
+        ? 'vue-ts'
+        : 'vue'
+      : projectType === 'svelte'
+        ? 'svelte'
+        : projectType === 'solid'
+          ? 'solid'
+          : projectType === 'angular'
+            ? 'angular'
+            : isNextLite || hasTs
+              ? 'react-ts'
+              : 'react';
+
   const spFiles: Record<string, string> = {};
 
   for (const [path, content] of Object.entries(aliasRewritten)) {
@@ -142,34 +163,47 @@ export function buildSandpackBundle(
     }
   }
 
-  userDeps.react = userDeps.react || '^18.3.1';
-  userDeps['react-dom'] = userDeps['react-dom'] || '^18.3.1';
-
   let entryFile = '/index.tsx';
 
-  if (isNextLite && nextAnalysis) {
-    delete userDeps.next;
-    Object.assign(spFiles, buildNextLiteShimFiles());
-    spFiles['/__kalpa/entry.tsx'] = buildNextLiteEntryCode(nextAnalysis);
-    entryFile = '/__kalpa/entry.tsx';
-  } else {
-    const existingMount = findExistingReactMount(allPaths);
-    if (existingMount) {
-      entryFile = existingMount;
+  if (projectType === 'react' || isNextLite) {
+    userDeps.react = userDeps.react || '^18.3.1';
+    userDeps['react-dom'] = userDeps['react-dom'] || '^18.3.1';
+
+    if (isNextLite && nextAnalysis) {
+      delete userDeps.next;
+      Object.assign(spFiles, buildNextLiteShimFiles());
+      spFiles['/__kalpa/entry.tsx'] = buildNextLiteEntryCode(nextAnalysis);
+      entryFile = '/__kalpa/entry.tsx';
     } else {
-      const appComp = findReactAppComponent(allPaths);
-      const cssPaths = allPaths.filter((p) => p.endsWith('.css')).slice(0, 3);
-      if (appComp) {
-        spFiles['/__kalpa/react-entry.tsx'] = synthesizeReactEntry(appComp, cssPaths);
-        entryFile = '/__kalpa/react-entry.tsx';
+      const existingMount = findExistingReactMount(allPaths);
+      if (existingMount) {
+        entryFile = existingMount;
+      } else {
+        const appComp = findReactAppComponent(allPaths);
+        const cssPaths = allPaths.filter((p) => p.endsWith('.css')).slice(0, 3);
+        if (appComp) {
+          spFiles['/__kalpa/react-entry.tsx'] = synthesizeReactEntry(appComp, cssPaths);
+          entryFile = '/__kalpa/react-entry.tsx';
+        }
       }
     }
-  }
 
-  // Bridge Sandpack's default template entry (/index.tsx or /index.js) so Sandpack never renders a default placeholder
-  const defaultTemplateEntry = template === 'react-ts' ? '/index.tsx' : '/index.js';
-  if (entryFile !== defaultTemplateEntry && !spFiles[defaultTemplateEntry]) {
-    spFiles[defaultTemplateEntry] = `import '${entryFile.replace(/\.(tsx?|jsx?)$/, '')}';\n`;
+    const defaultTemplateEntry = template === 'react-ts' ? '/index.tsx' : '/index.js';
+    if (entryFile !== defaultTemplateEntry && !spFiles[defaultTemplateEntry]) {
+      spFiles[defaultTemplateEntry] = `import '${entryFile.replace(/\.(tsx?|jsx?)$/, '')}';\n`;
+    }
+  } else if (projectType === 'vue') {
+    userDeps.vue = userDeps.vue || '^3.4.0';
+    entryFile =
+      findExistingReactMount(allPaths) || (template === 'vue-ts' ? '/src/main.ts' : '/src/main.js');
+  } else if (projectType === 'svelte') {
+    userDeps.svelte = userDeps.svelte || '^4.2.0';
+    entryFile = findExistingReactMount(allPaths) || '/index.js';
+  } else if (projectType === 'solid') {
+    userDeps['solid-js'] = userDeps['solid-js'] || '^1.8.0';
+    entryFile = findExistingReactMount(allPaths) || '/index.tsx';
+  } else if (projectType === 'angular') {
+    entryFile = '/src/main.ts';
   }
 
   spFiles['/package.json'] = JSON.stringify(
@@ -184,41 +218,63 @@ export function buildSandpackBundle(
     2
   );
 
-  // Extract optional custom title or root id from Vite index.html if present
   const rawHtml = rawSnapshot['index.html'] || rawSnapshot['public/index.html'] || '';
   const titleMatch = /<title>([^<]{1,80})<\/title>/i.exec(rawHtml);
   const rootIdMatch = /<div\b[^>]*\bid=["'](root|app)["'][^>]*>/i.exec(rawHtml);
-  const rootDivId = rootIdMatch?.[1] || 'root';
+  const rootDivId = rootIdMatch?.[1] || (projectType === 'vue' ? 'app' : 'root');
   const pageTitle = titleMatch?.[1]?.trim() || 'Preview';
 
-  const inlineTwBlocks = tw.inlineTailwindCss
-    .map((cssText) => `<style type="text/tailwindcss">\n${cssText}\n</style>`)
-    .join('\n');
+  const twHeadTags = buildTailwindHeadTags({
+    runtime: tw.runtime,
+    configScript: tw.configScript,
+    inlineTailwindCss: tw.inlineTailwindCss,
+  });
 
-  const readyScript = `<script>
+  // B2 + B3: Freshness ready signal (60ms) + Blank-screen DOM probe (1500ms)
+  const readyAndProbeScript = `<script>
 (function(){
-  function ping(){
-    try { parent.postMessage({ kalpa: 'preview-ready', filesHash: ${JSON.stringify(expectedFilesHash)} }, '*'); } catch (_) {}
+  var fh = ${JSON.stringify(expectedFilesHash)};
+  function pingReady(){
+    try { parent.postMessage({ kalpa: 'preview-ready', filesHash: fh }, '*'); } catch (_) {}
   }
-  window.addEventListener('load', function(){ setTimeout(ping, 60); });
+  function pingProbe(){
+    try {
+      var r = document.getElementById('root') || document.getElementById('app') || document.getElementById('__next');
+      var rootChildren = r ? r.children.length : -1;
+      var textLen = ((document.body && document.body.innerText) || '').trim().length;
+      var hasVisualMedia = !!document.querySelector('canvas, svg, img, video');
+      parent.postMessage({ kalpa: 'preview-probe', filesHash: fh, rootChildren: rootChildren, textLen: textLen, hasVisualMedia: hasVisualMedia }, '*');
+    } catch (_) {}
+  }
+  window.addEventListener('load', function(){
+    setTimeout(pingReady, 60);
+    setTimeout(pingProbe, 1500);
+  });
 })();
 </script>`;
 
-  spFiles['/public/index.html'] = `<!DOCTYPE html>
+  const htmlDoc = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${pageTitle}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  ${tw.configScript}
-  ${inlineTwBlocks}
-  ${readyScript}
+  ${twHeadTags}
+  ${readyAndProbeScript}
 </head>
 <body>
+  <div class="hidden" id="__tw_probe"></div>
   <div id="${rootDivId}"></div>
 </body>
 </html>`;
+
+  const htmlTargetPath =
+    template === 'solid'
+      ? '/index.html'
+      : template === 'angular'
+        ? '/src/index.html'
+        : '/public/index.html';
+  spFiles[htmlTargetPath] = htmlDoc;
 
   const structuralHash = fnv1a(
     JSON.stringify({
@@ -235,7 +291,8 @@ export function buildSandpackBundle(
     entryFile,
     structuralHash,
     expectedFilesHash,
-    hasTailwindV4Warning: tw.hasTailwindV4Warning,
+    tailwindRuntime: tw.runtime,
+    hasTailwindV4Warning: false,
     unsupportedNextFeatures: nextAnalysis?.unsupported ?? [],
   };
 }

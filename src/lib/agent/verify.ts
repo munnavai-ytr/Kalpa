@@ -38,31 +38,84 @@ export async function verifyWorkspaceAfterWrites(
     return { hasError: false, errorSignature: '', resultBlocks: [] };
   }
 
-  // Cloud Sandbox verification
+  // A8: Cloud Sandbox verification (status, host-probe, beacon runtime errors, blank screen, real logs)
   if (opts.engine === 'cloud') {
-    const sbState = useSandboxStore.getState();
+    let sbState = useSandboxStore.getState();
     const blocks: string[] = [];
     let hasError = false;
     let sig = '';
 
     if (sbState.status === 'connected') {
-      if (sbState.devServerStatus === 'crashed') {
+      // Ensure dev server is started if runnable files exist
+      if (sbState.devServerStatus === 'stopped') {
+        await sbState.ensureDevServerRunning(projectId);
+        sbState = useSandboxStore.getState();
+      }
+
+      // Wait up to 45s if server is currently installing or starting
+      const settleDeadline = Date.now() + 45_000;
+      while (
+        Date.now() < settleDeadline &&
+        !opts.signal?.aborted &&
+        (sbState.devServerStatus === 'installing' || sbState.devServerStatus === 'starting')
+      ) {
+        await new Promise((r) => setTimeout(r, 600));
+        sbState = useSandboxStore.getState();
+      }
+
+      if (sbState.devServerStatus === 'running') {
+        const hostCheck = await sbState.probeActiveHost();
+        if (!hostCheck.ok && hostCheck.blockedMessage) {
+          hasError = true;
+          const detail = `${hostCheck.blockedMessage}\n\nRecent server logs:\n${sbState.devServerLogTail}`;
+          sig = normalizeErrorSignature(`host-blocked:${hostCheck.blockedMessage}`);
+          blocks.push(formatDevServerResult(sbState.devServerPort, 'crashed', detail));
+        } else {
+          // Give cloud-beacon 1.6s to report runtime errors or blank screen if iframe is mounted
+          await new Promise((r) => setTimeout(r, 1600));
+          sbState = useSandboxStore.getState();
+
+          if (sbState.cloudBeaconErrors.length > 0) {
+            hasError = true;
+            const errLines = sbState.cloudBeaconErrors
+              .map((e) => `${e.source ? `${e.source}${e.line ? `:${e.line}` : ''}: ` : ''}${e.message}`)
+              .join('\n');
+            const detail = `Browser runtime errors in Cloud preview:\n${errLines}\n\nServer logs:\n${sbState.devServerLogTail}`;
+            sig = normalizeErrorSignature(`cloud-beacon:${errLines}`);
+            blocks.push(formatPreviewResult('error', 1600, detail));
+          } else if (sbState.cloudBlankScreen) {
+            hasError = true;
+            const detail =
+              `Cloud preview started on port ${sbState.devServerPort} but rendered a blank screen (#root/#app/#__next is empty and body text length < 5).\n\n` +
+              `Server logs:\n${sbState.devServerLogTail || '(no server errors)'}`;
+            sig = normalizeErrorSignature(`cloud-blank:${sbState.devServerPort}`);
+            blocks.push(formatPreviewResult('error', 1600, detail));
+          } else {
+            blocks.push(
+              formatDevServerResult(
+                sbState.devServerPort,
+                'running',
+                sbState.devServerLogTail || '(dev server clean, public host probe passed)'
+              )
+            );
+          }
+        }
+      } else if (sbState.devServerStatus === 'crashed' || sbState.hostBlockedMessage) {
         hasError = true;
-        sig = normalizeErrorSignature(`devserver-crashed:${sbState.devServerLogTail.slice(-200)}`);
+        const realLog = [
+          sbState.hostBlockedMessage,
+          sbState.devServerLogTail || 'Dev server exited unexpectedly.',
+        ]
+          .filter(Boolean)
+          .join('\n\n');
+        sig = normalizeErrorSignature(`devserver-crashed:${realLog.slice(-260)}`);
+        blocks.push(formatDevServerResult(sbState.devServerPort, 'crashed', realLog));
+      } else if (sbState.devServerStatus !== 'stopped') {
         blocks.push(
           formatDevServerResult(
             sbState.devServerPort,
-            'crashed',
-            sbState.devServerLogTail || 'Dev server exited unexpectedly.'
-          )
-        );
-      } else {
-        const mappedStatus = sbState.devServerStatus === 'running' ? 'running' : 'starting';
-        blocks.push(
-          formatDevServerResult(
-            sbState.devServerPort,
-            mappedStatus,
-            sbState.devServerLogTail || '(dev server clean)'
+            'starting',
+            sbState.devServerLogTail || '(dev server still starting)'
           )
         );
       }
@@ -180,9 +233,9 @@ export async function verifyWorkspaceAfterWrites(
     }
   }
 
-  // Web preview (Static HTML or Sandpack React/Next-Lite): wait up to 4s to settle
+  // Web preview (Static HTML or Sandpack): wait up to 4.2s to settle + receive preview-probe (B3)
   usePreviewStore.getState().clearEntries();
-  const deadline = Date.now() + 4000;
+  const deadline = Date.now() + 4200;
   while (Date.now() < deadline) {
     if (opts.signal?.aborted) break;
     await new Promise((r) => setTimeout(r, 350));
@@ -199,13 +252,24 @@ export async function verifyWorkspaceAfterWrites(
         resultBlocks: [formatPreviewResult('error', settledMs, body)],
       };
     }
-    if (st.status === 'ready' && Date.now() - (deadline - 4000) >= 1100) {
+    if (st.status === 'blank') {
+      const settledMs = performance.now() - tStart;
+      const body =
+        'Instant preview rendered a blank screen (#root/#app/#__next has 0 children and body text length < 5). Ensure your entry file mounts a visible component cleanly.';
+      return {
+        hasError: true,
+        errorSignature: 'instant-preview-blank',
+        resultBlocks: [formatPreviewResult('error', settledMs, body)],
+      };
+    }
+    if (st.status === 'ready' && Date.now() - (deadline - 4200) >= 1750) {
       break;
     }
   }
 
   const settledMs = performance.now() - tStart;
-  const finalErrs = usePreviewStore.getState().entries.filter((e) => e.level === 'error');
+  const finalState = usePreviewStore.getState();
+  const finalErrs = finalState.entries.filter((e) => e.level === 'error');
   if (finalErrs.length > 0) {
     const body = finalErrs
       .map((e) => `${e.file ? `${e.file}${e.line ? `:${e.line}` : ''}: ` : ''}${e.message}`)
@@ -213,6 +277,15 @@ export async function verifyWorkspaceAfterWrites(
     return {
       hasError: true,
       errorSignature: normalizeErrorSignature(body),
+      resultBlocks: [formatPreviewResult('error', settledMs, body)],
+    };
+  }
+  if (finalState.status === 'blank') {
+    const body =
+      'Instant preview rendered a blank screen (#root/#app/#__next has 0 children and body text length < 5). Ensure your entry file mounts a visible component cleanly.';
+    return {
+      hasError: true,
+      errorSignature: 'instant-preview-blank',
       resultBlocks: [formatPreviewResult('error', settledMs, body)],
     };
   }

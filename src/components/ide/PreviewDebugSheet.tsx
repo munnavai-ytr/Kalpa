@@ -1,9 +1,13 @@
 'use client';
 
 import React from 'react';
-import type { Detection } from '@/lib/agent/reliability';
+import type { ExtendedDetection } from '@/lib/preview/detect';
 import type { EngineKind } from '@/lib/vfs/db';
-import type { PreviewConsoleEntry, PreviewStatus } from '@/stores/preview';
+import type {
+  PreviewConsoleEntry,
+  PreviewStatus,
+  TailwindProbeState,
+} from '@/stores/preview';
 import { Modal } from '@/components/ui/Modal';
 
 export interface PreviewDebugSheetProps {
@@ -12,13 +16,21 @@ export interface PreviewDebugSheetProps {
   projectId: string | null;
   projectName: string | null;
   engine: EngineKind;
-  detection: Detection;
+  detection: ExtendedDetection;
   workspaceFileCount: number;
   sandpackFileCount: number;
   status: PreviewStatus;
   expectedFilesHash: string;
   confirmedFilesHash: string;
+  tailwindProbe: TailwindProbeState | null;
   entries: PreviewConsoleEntry[];
+}
+
+function formatTailwindStatus(probe: TailwindProbeState | null): string {
+  if (!probe) return 'not probed yet';
+  if (!probe.ok || probe.source === 'failed') return 'FAILED';
+  const via = probe.source === 'self' ? 'self-hosted' : 'CDN';
+  return `loaded via ${via} ${probe.runtime}`;
 }
 
 export function PreviewDebugSheet({
@@ -33,6 +45,7 @@ export function PreviewDebugSheet({
   status,
   expectedFilesHash,
   confirmedFilesHash,
+  tailwindProbe,
   entries,
 }: PreviewDebugSheetProps) {
   const recentErrors = entries.filter((e) => e.level === 'error').slice(-5);
@@ -43,7 +56,7 @@ export function PreviewDebugSheet({
       open={open}
       onClose={onClose}
       title="Preview Inspector"
-      description="Live workspace detection, file hashes, and bundler diagnostics."
+      description="Live workspace detection, file hashes, Tailwind runtime, and bundler diagnostics."
       maxWidthClass="max-w-lg"
     >
       <div className="space-y-3 text-xs">
@@ -78,6 +91,20 @@ export function PreviewDebugSheet({
             <span className="block text-[10px] uppercase text-kalpa-muted">Freshness Hash</span>
             <span className={hashSynced ? 'text-kalpa-success' : 'text-kalpa-warn'}>
               {expectedFilesHash || '—'} / {confirmedFilesHash || 'pending'}
+            </span>
+          </div>
+          <div className="col-span-2">
+            <span className="block text-[10px] uppercase text-kalpa-muted">Tailwind</span>
+            <span
+              className={
+                !tailwindProbe
+                  ? 'text-kalpa-muted'
+                  : tailwindProbe.ok
+                    ? 'text-kalpa-success'
+                    : 'text-kalpa-danger'
+              }
+            >
+              Tailwind: {formatTailwindStatus(tailwindProbe)}
             </span>
           </div>
         </div>

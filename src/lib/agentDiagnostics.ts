@@ -18,10 +18,15 @@ import {
   executeReliabilityDiagnostics,
   INITIAL_RELIABILITY_DIAGNOSTIC_CHECKS,
 } from './reliabilityDiagnostics';
+import {
+  executePreviewSandboxDiagnostics,
+  INITIAL_PREVIEW_SANDBOX_DIAGNOSTIC_CHECKS,
+} from './previewSandboxDiagnostics';
 
 export const INITIAL_AGENT_DIAGNOSTIC_CHECKS: DiagItem[] = [
   { id: 'agent-protocol', label: 'Agent ActionStream & Tolerant Edits', state: 'RUNNING', detail: 'Streaming XML chunks…' },
   ...INITIAL_RELIABILITY_DIAGNOSTIC_CHECKS,
+  ...INITIAL_PREVIEW_SANDBOX_DIAGNOSTIC_CHECKS,
   { id: 'checkpoints', label: 'Checkpoint SHA-1 Snapshot Round-Trip', state: 'RUNNING', detail: 'Testing tree restore…' },
   { id: 'brain-index', label: 'Brain Index & Import Graph Builder', state: 'RUNNING', detail: 'Scanning exports & rdeps…' },
   { id: 'token-estimator', label: 'Token Budget & Context Estimator', state: 'RUNNING', detail: 'Computing allocation…' },
@@ -110,6 +115,9 @@ export async function executeAgentDiagnosticsSuite(
 
   // 1b. Reliability Self-Tests (Error Classifier, Lenient/Markdown Parser, Nested ZIP + Sandpack Rewrite)
   await executeReliabilityDiagnostics(upsertCheck);
+
+  // 1c. Preview + Cloud Sandbox Self-Tests (Shell Classifier, Tailwind Runtime, Vite + Host Probe + Beacon)
+  await executePreviewSandboxDiagnostics(upsertCheck);
 
   // 2. Checkpoint Round-Trip
   const tCp = performance.now();

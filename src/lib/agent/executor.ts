@@ -3,7 +3,7 @@ import {
   markMilestoneCompleted,
 } from '@/lib/brain/files';
 import { runVirtualShellProgrammatic } from '@/lib/runtime/programmaticShell';
-import { prepareShellMarker, syncSandboxChangesBackToVfs } from '@/lib/sandbox/sync';
+import { executeCloudShellAction } from '@/lib/sandbox/cloudShellExec';
 import { MAX_PROJECT_FILES, MAX_TEXT_FILE_BYTES } from '@/lib/vfs/paths';
 import { vfs } from '@/lib/vfs/vfs';
 import {
@@ -19,7 +19,6 @@ import { useTerminalStore } from '@/stores/terminal';
 import { applyEdits } from './actions';
 import type { AgentMode } from './prompts/system';
 import {
-  formatAppNoticeResult,
   formatEditResult,
   formatFileResult,
   formatMemoryResult,
@@ -68,7 +67,8 @@ export async function executeIterationActions(
   let ranShell = false;
   let openedFirst = ctx.openedFirstCodeFile;
   let completedMilestone: string | null = null;
-  let nextMilestone: string | null = null;
+  let nextMilestone: string | null;
+  nextMilestone = null;
   let sawFinished = false;
 
   for (const { item, action } of iterActions) {
@@ -234,32 +234,31 @@ export async function executeIterationActions(
       item.outcome = { ok: true, detail: xml };
       iterResults.push(xml);
     } else if (action.type === 'shell') {
-      const tShell = performance.now();
-      useTerminalStore.getState().writeLine(`$ ${action.cmd}`, 'system');
       const sb = useSandboxStore.getState();
 
       if (sb.engine === 'cloud' && sb.session) {
-        await prepareShellMarker(sb.session);
-        const execRes = await sb.session.exec(action.cmd, {
+        const cloudRes = await executeCloudShellAction({
+          projectId,
+          session: sb.session,
+          cmd: action.cmd,
           cwd: action.cwd,
-          timeoutMs: (action.timeout ?? 120) * 1000,
-          onStdout: (s) => useTerminalStore.getState().writeLine(s.trimEnd(), 'info'),
-          onStderr: (s) => useTerminalStore.getState().writeLine(s.trimEnd(), 'stderr'),
+          timeoutSec: action.timeout,
+          background: action.background,
+          port: action.port,
+          signal,
+          touchedPathsInTurn,
         });
-        const syncBack = await syncSandboxChangesBackToVfs(projectId, sb.session);
-        syncBack.syncedPaths.forEach((p) => touchedPathsInTurn.add(p));
-        const ms = performance.now() - tShell;
-        const combined = [execRes.stdout, execRes.stderr].filter(Boolean).join('\n');
         ranShell = true;
         item.outcome = {
-          ok: execRes.exitCode === 0,
-          exitCode: execRes.exitCode,
-          durationMs: Math.round(ms),
-          output: combined,
+          ok: cloudRes.ok,
+          exitCode: cloudRes.exitCode,
+          durationMs: cloudRes.durationMs,
+          output: cloudRes.combinedOutput,
         };
-        iterResults.push(formatShellResult(execRes.exitCode, ms, combined));
-        if (syncBack.warning) iterResults.push(formatAppNoticeResult(syncBack.warning));
+        iterResults.push(...cloudRes.resultBlocks);
       } else {
+        const tShell = performance.now();
+        useTerminalStore.getState().writeLine(`$ ${action.cmd}`, 'system');
         const vRes = await runVirtualShellProgrammatic(projectId, action.cmd, (line, isErr) => {
           useTerminalStore.getState().writeLine(line, isErr ? 'stderr' : 'info');
         });
@@ -289,6 +288,10 @@ export async function executeIterationActions(
       const mId = action.milestone || 'milestone';
       if (action.milestone) await markMilestoneCompleted(projectId, action.milestone);
       await useBrainStore.getState().refreshBrainFromVfs(projectId);
+      const sbNow = useSandboxStore.getState();
+      if (sbNow.engine === 'cloud' && sbNow.status === 'connected' && sbNow.devServerStatus === 'stopped') {
+        void sbNow.ensureDevServerRunning(projectId);
+      }
       completedMilestone = mId;
       nextMilestone = action.next || null;
       item.outcome = { ok: true, summary: `Milestone ${mId} complete` };
@@ -297,6 +300,10 @@ export async function executeIterationActions(
       if ((mode === 'NEW_PROJECT' || mode === 'CONTINUE') && !modifiedCode && touchedPathsInTurn.size === 0) {
         item.outcome = { ok: false, summary: 'Skipped: 0 source files written yet' };
         continue;
+      }
+      const sbNow = useSandboxStore.getState();
+      if (sbNow.engine === 'cloud' && sbNow.status === 'connected' && sbNow.devServerStatus === 'stopped') {
+        void sbNow.ensureDevServerRunning(projectId);
       }
       sawFinished = true;
       item.outcome = { ok: true, summary: 'Done' };

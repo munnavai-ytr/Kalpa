@@ -1,9 +1,11 @@
 import { resolveRelativePath } from '@/lib/vfs/paths';
+import { buildTailwindHeadTags } from './tailwindInject';
 
 function buildStaticShim(expectedHash: string): string {
   const safeHash = JSON.stringify(expectedHash);
   return `<script>
 (function(){
+  var fh = ${safeHash};
   function send(level, args, file, line) {
     try {
       var msg = Array.prototype.slice.call(args).map(function(x){
@@ -28,13 +30,25 @@ function buildStaticShim(expectedHash: string): string {
     send('error', ['Unhandled rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)]);
   });
   function notifyReady(){
-    try { parent.postMessage({ kalpa: 'preview-ready', filesHash: ${safeHash} }, '*'); } catch (_) {}
+    try { parent.postMessage({ kalpa: 'preview-ready', filesHash: fh }, '*'); } catch (_) {}
+  }
+  function notifyProbe(){
+    try {
+      var r = document.getElementById('root') || document.getElementById('app') || document.getElementById('__next');
+      var rootChildren = r ? r.children.length : -1;
+      var textLen = ((document.body && document.body.innerText) || '').trim().length;
+      var hasVisualMedia = !!document.querySelector('canvas, svg, img, video');
+      parent.postMessage({ kalpa: 'preview-probe', filesHash: fh, rootChildren: rootChildren, textLen: textLen, hasVisualMedia: hasVisualMedia }, '*');
+    } catch (_) {}
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', notifyReady, { once: true });
   } else {
     setTimeout(notifyReady, 0);
   }
+  window.addEventListener('load', function(){
+    setTimeout(notifyProbe, 1500);
+  });
 })();
 </script>`;
 }
@@ -77,6 +91,28 @@ export function buildStaticHtmlDocument(
       return `<script${before}${after} data-kalpa-src="${cleanPath}">\n${js}\n</script>`;
     }
   );
+
+  // B1: Upgrade static HTML Tailwind CDN scripts to self-hosted + CDN fallback + __tw_probe
+  const usesTwV4 = /@tailwindcss\/browser|type=["']text\/tailwindcss["'][\s\S]*?@theme\b/i.test(html);
+  const usesTwV3 = /cdn\.tailwindcss\.com/i.test(html);
+  if (usesTwV3 || usesTwV4) {
+    html = html
+      .replace(/<script\b[^>]*src=["']https?:\/\/cdn\.tailwindcss\.com[^"']*["'][^>]*><\/script>/gi, '')
+      .replace(/<script\b[^>]*src=["']https?:\/\/[^"']*@tailwindcss\/browser[^"']*["'][^>]*><\/script>/gi, '');
+    const twHead = buildTailwindHeadTags({ runtime: usesTwV4 ? 'v4' : 'v3' });
+    if (/<head\b[^>]*>/i.test(html)) {
+      html = html.replace(/<head\b[^>]*>/i, (m) => `${m}\n${twHead}`);
+    } else {
+      html = `${twHead}\n${html}`;
+    }
+    if (!html.includes('id="__tw_probe"')) {
+      if (/<body\b[^>]*>/i.test(html)) {
+        html = html.replace(/<body\b[^>]*>/i, (m) => `${m}\n<div class="hidden" id="__tw_probe"></div>`);
+      } else {
+        html = `${html}\n<div class="hidden" id="__tw_probe"></div>`;
+      }
+    }
+  }
 
   const shim = buildStaticShim(expectedHash);
   if (/<head\b[^>]*>/i.test(html)) {

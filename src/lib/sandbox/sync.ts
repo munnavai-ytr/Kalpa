@@ -2,9 +2,11 @@ import { vfs } from '@/lib/vfs/vfs';
 import type { SandboxSession } from './provider';
 
 const IGNORED_PREFIXES = ['.kalpa/', 'node_modules/', '.next/', '.git/', 'dist/'];
+export const SANDBOX_ONLY_MARKER = '/* __KALPA_SANDBOX_ONLY__ */';
 
 export function shouldSyncPathToSandbox(path: string): boolean {
   if (!path || path.endsWith('/.gitkeep')) return false;
+  if (path.startsWith('.kalpa-') || path.includes('/.kalpa-')) return false;
   if (path === '.kalpa' || path === 'node_modules' || path === '.next' || path === '.git' || path === 'dist') {
     return false;
   }
@@ -107,7 +109,7 @@ export async function syncSandboxChangesBackToVfs(
 ): Promise<{ syncedPaths: string[]; warning?: string }> {
   const findCmd =
     "find . -maxdepth 5 -type f -newer /tmp/kalpa.marker " +
-    "-not -path './.kalpa/*' -not -path './node_modules/*' " +
+    "-not -path './.kalpa/*' -not -name '.kalpa-*' -not -path './node_modules/*' " +
     "-not -path './.next/*' -not -path './.git/*' -not -path './dist/*' " +
     "-size -200k | head -n 55";
 
@@ -133,8 +135,8 @@ export async function syncSandboxChangesBackToVfs(
   for (const relPath of capped) {
     try {
       const content = await session.readFile(relPath);
-      // Skip binary files containing null bytes
-      if (content.includes('\u0000')) continue;
+      // Skip binary files containing null bytes or sandbox-only host patches
+      if (content.includes('\u0000') || content.includes(SANDBOX_ONLY_MARKER)) continue;
       if (currentSnap[relPath] !== content) {
         writes.push({ path: relPath, content, encoding: 'utf8' });
       }

@@ -76,6 +76,11 @@ export interface ChatRecord {
     milestoneNext?: string;
     stopped?: boolean;
     plainChat?: boolean;
+    scaffoldFixes?: {
+      id: string;
+      fixedCount: number;
+      issues: { id: string; status: 'fixed' | 'warn' | 'error'; message: string }[];
+    }[];
   };
 }
 

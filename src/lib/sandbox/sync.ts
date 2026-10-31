@@ -4,6 +4,14 @@ import type { SandboxSession } from './provider';
 const IGNORED_PREFIXES = ['.kalpa/', 'node_modules/', '.next/', '.git/', 'dist/'];
 export const SANDBOX_ONLY_MARKER = '/* __KALPA_SANDBOX_ONLY__ */';
 
+const activeSyncByProject = new Map<
+  string,
+  {
+    getSession: () => SandboxSession | null;
+    lastSynced: Map<string, string>;
+  }
+>();
+
 export function shouldSyncPathToSandbox(path: string): boolean {
   if (!path || path.endsWith('/.gitkeep')) return false;
   if (path.startsWith('.kalpa-') || path.includes('/.kalpa-')) return false;
@@ -42,6 +50,10 @@ export function createDebouncedVfsSync(opts: {
   const lastSynced = new Map(opts.initialMap);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let suppressNext = false;
+  activeSyncByProject.set(opts.projectId, {
+    getSession: opts.getSession,
+    lastSynced,
+  });
 
   const flush = async () => {
     timer = null;
@@ -91,8 +103,43 @@ export function createDebouncedVfsSync(opts: {
 
   return () => {
     if (timer) clearTimeout(timer);
+    if (activeSyncByProject.get(opts.projectId)?.lastSynced === lastSynced) {
+      activeSyncByProject.delete(opts.projectId);
+    }
     unsub();
   };
+}
+
+export async function mirrorChangesToActiveSandbox(
+  projectId: string,
+  changes: Record<string, string | null>,
+  explicitSession?: SandboxSession | null
+): Promise<boolean> {
+  const active = activeSyncByProject.get(projectId);
+  const session = explicitSession ?? active?.getSession() ?? null;
+  if (!session) return false;
+
+  const toWrite: { path: string; content: string }[] = [];
+  const toRemove: string[] = [];
+
+  for (const [path, content] of Object.entries(changes)) {
+    if (!shouldSyncPathToSandbox(path)) continue;
+    if (content === null) {
+      toRemove.push(path);
+      active?.lastSynced.delete(path);
+    } else {
+      toWrite.push({ path, content });
+      active?.lastSynced.set(path, content);
+    }
+  }
+
+  try {
+    if (toWrite.length > 0) await session.writeFiles(toWrite);
+    for (const rem of toRemove) await session.remove(rem);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function prepareShellMarker(session: SandboxSession): Promise<void> {

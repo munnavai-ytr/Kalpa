@@ -54,6 +54,7 @@ tailwind: ${
       ? 'any'
       : 'tailwind-v3-or-v4-in-instant (prefer Tailwind v3 for new Instant projects)'
   }
+scaffold_doctor: on (the app automatically repairs missing/incorrect config files: postcss, tailwind, vite, tsconfig, undeclared dependencies)
 file_limits: max 2MB per file, max 2000 files, paths relative to project root, never touch .kalpa/ directly
 user_language: ${lang}
 today: ${today}

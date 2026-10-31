@@ -289,7 +289,7 @@ export async function executeIterationActions(
       if (action.milestone) await markMilestoneCompleted(projectId, action.milestone);
       await useBrainStore.getState().refreshBrainFromVfs(projectId);
       const sbNow = useSandboxStore.getState();
-      if (sbNow.engine === 'cloud' && sbNow.status === 'connected' && sbNow.devServerStatus === 'stopped') {
+      if (!modifiedCode && sbNow.engine === 'cloud' && sbNow.status === 'connected' && sbNow.devServerStatus === 'stopped') {
         void sbNow.ensureDevServerRunning(projectId);
       }
       completedMilestone = mId;
@@ -302,7 +302,7 @@ export async function executeIterationActions(
         continue;
       }
       const sbNow = useSandboxStore.getState();
-      if (sbNow.engine === 'cloud' && sbNow.status === 'connected' && sbNow.devServerStatus === 'stopped') {
+      if (!modifiedCode && sbNow.engine === 'cloud' && sbNow.status === 'connected' && sbNow.devServerStatus === 'stopped') {
         void sbNow.ensureDevServerRunning(projectId);
       }
       sawFinished = true;

@@ -58,6 +58,7 @@ export function ChatPanel() {
   const stopStreaming = useChatStore((s) => s.stopStreaming);
   const regenerateLast = useChatStore((s) => s.regenerateLast);
   const clearChat = useChatStore((s) => s.clearChat);
+  const loadChat = useChatStore((s) => s.loadChat);
 
   const isAgentRunning = useAgentStore((s) => s.isRunning);
   const liveItems = useAgentStore((s) => s.liveItems);
@@ -91,6 +92,19 @@ export function ChatPanel() {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, liveItems.length, partialAction?.lineCount, streamingText]);
+
+  useEffect(() => {
+    if (!currentProject) return;
+    const targetPid = currentProject.id;
+    const onChatUpdated = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ projectId?: string }>).detail;
+      if (!detail?.projectId || detail.projectId === targetPid) {
+        void loadChat(targetPid);
+      }
+    };
+    window.addEventListener('kalpa:chat-updated', onChatUpdated);
+    return () => window.removeEventListener('kalpa:chat-updated', onChatUpdated);
+  }, [currentProject, loadChat]);
 
   useEffect(() => {
     const el = textareaRef.current;

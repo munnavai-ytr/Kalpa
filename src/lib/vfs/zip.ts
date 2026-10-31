@@ -142,6 +142,10 @@ export async function importZipIntoExistingProject(
     await vfs.writeMany(projectId, entries);
   }
   await ensureBrainFiles(projectId);
+  if (entries.length > 0) {
+    const { runProjectScaffoldDoctor } = await import('@/lib/agent/verify');
+    await runProjectScaffoldDoctor(projectId, { source: 'zip-import', force: true });
+  }
   await rebuildBrainIndex(projectId);
   const snap = await vfs.snapshot(projectId);
   const det = detectProjectType(snap);
@@ -157,6 +161,10 @@ export async function importFolderIntoExistingProject(
     await vfs.writeMany(projectId, entries);
   }
   await ensureBrainFiles(projectId);
+  if (entries.length > 0) {
+    const { runProjectScaffoldDoctor } = await import('@/lib/agent/verify');
+    await runProjectScaffoldDoctor(projectId, { source: 'zip-import', force: true });
+  }
   await rebuildBrainIndex(projectId);
   const snap = await vfs.snapshot(projectId);
   const det = detectProjectType(snap);

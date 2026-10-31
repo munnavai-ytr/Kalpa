@@ -14,8 +14,13 @@ import {
   Smartphone,
   Tablet,
   TerminalSquare,
+  X,
 } from 'lucide-react';
 import { filesHash } from '@/lib/agent/reliability';
+import {
+  previewImmediateSandpackFiles,
+  runProjectScaffoldDoctor,
+} from '@/lib/agent/verify';
 import { filterOutBrainFiles } from '@/lib/brain/caps';
 import { exportProjectAsZip } from '@/lib/export/zip';
 import { chooseEngine, detectExtendedStack } from '@/lib/preview/detect';
@@ -62,6 +67,7 @@ export function PreviewPanel() {
   const devServerStatus = useSandboxStore((s) => s.devServerStatus);
   const devServerPort = useSandboxStore((s) => s.devServerPort);
   const devServerUrl = useSandboxStore((s) => s.devServerUrl);
+  const cloudStylesUnapplied = useSandboxStore((s) => s.cloudStylesUnapplied);
   const runDevServer = useSandboxStore((s) => s.runDevServer);
   const switchEngine = useSandboxStore((s) => s.switchEngine);
 
@@ -75,6 +81,7 @@ export function PreviewPanel() {
   const confirmedFilesHash = usePreviewStore((s) => s.confirmedFilesHash);
   const staleAfterMaxRetries = usePreviewStore((s) => s.staleAfterMaxRetries);
   const tailwindProbe = usePreviewStore((s) => s.tailwindProbe);
+  const scaffoldTailwindNoteByProject = usePreviewStore((s) => s.scaffoldTailwindNoteByProject);
   const setStatus = usePreviewStore((s) => s.setStatus);
   const setDeviceFrame = usePreviewStore((s) => s.setDeviceFrame);
   const setConsoleOpen = usePreviewStore((s) => s.setConsoleOpen);
@@ -87,6 +94,7 @@ export function PreviewPanel() {
   const markPreviewBlank = usePreviewStore((s) => s.markPreviewBlank);
   const markPreviewTimeout = usePreviewStore((s) => s.markPreviewTimeout);
   const setTailwindProbe = usePreviewStore((s) => s.setTailwindProbe);
+  const setScaffoldTailwindNote = usePreviewStore((s) => s.setScaffoldTailwindNote);
   const setActiveIdeTab = useUiStore((s) => s.setActiveIdeTab);
   const addToast = useUiStore((s) => s.addToast);
 
@@ -211,13 +219,46 @@ export function PreviewPanel() {
     };
   }, [cleanWorkspaceFiles, currentHash, detection.entry, detection.type, isStaleProjectSnapshot, reloadNonce, setStaticBlobUrl, setStatus, useCloudView]);
 
+  // A2.2: Run Scaffold Doctor before Sandpack builds
+  useEffect(() => {
+    if (
+      isStaleProjectSnapshot ||
+      useCloudView ||
+      isAgentRunning ||
+      !currentProject ||
+      !SANDPACK_STACKS.has(detection.type)
+    ) {
+      return;
+    }
+    void runProjectScaffoldDoctor(currentProject.id, { source: 'sandpack' });
+  }, [
+    cleanWorkspaceFiles,
+    currentProject,
+    detection.type,
+    isAgentRunning,
+    isStaleProjectSnapshot,
+    useCloudView,
+  ]);
+
   const sandpackBundle = useMemo(() => {
-    if (isStaleProjectSnapshot || useCloudView) return null;
+    if (isStaleProjectSnapshot || useCloudView || !currentProject) return null;
     if (SANDPACK_STACKS.has(detection.type)) {
-      return buildSandpackBundle(detection.type as SandpackStackKind, cleanWorkspaceFiles);
+      const effectiveFiles = previewImmediateSandpackFiles(
+        currentProject.id,
+        cleanWorkspaceFiles,
+        currentHash
+      );
+      return buildSandpackBundle(detection.type as SandpackStackKind, effectiveFiles);
     }
     return null;
-  }, [cleanWorkspaceFiles, detection.type, isStaleProjectSnapshot, useCloudView]);
+  }, [
+    cleanWorkspaceFiles,
+    currentHash,
+    currentProject,
+    detection.type,
+    isStaleProjectSnapshot,
+    useCloudView,
+  ]);
 
   const errorCount = entries.filter((e) => e.level === 'error').length;
   const isWebIframeMode =
@@ -243,6 +284,21 @@ export function PreviewPanel() {
       return;
     }
     await switchEngine(currentProject.id, 'cloud');
+  };
+
+  // A2.3: Run Scaffold Doctor after "Retry build" (Reload / Rebuild)
+  const handleRetryBuild = async () => {
+    if (currentProject && !isAgentRunning) {
+      const docOut = await runProjectScaffoldDoctor(currentProject.id, {
+        source: 'retry-build',
+        force: true,
+      });
+      if (useCloudView && (docOut.pkgChanged || docOut.configChanged)) {
+        await runDevServer(currentProject.id, docOut.pkgChanged);
+        return;
+      }
+    }
+    reloadPreview();
   };
 
   const handleAskAiFixBlank = () => {
@@ -278,7 +334,9 @@ export function PreviewPanel() {
       : devServerStatus === 'starting'
         ? `Starting :${devServerPort}…`
         : devServerStatus === 'running'
-          ? `Cloud :${devServerPort}`
+          ? cloudStylesUnapplied
+            ? 'Styles not applied'
+            : `Cloud :${devServerPort}`
           : devServerStatus === 'crashed'
             ? 'Server crashed'
             : 'Cloud idle'
@@ -294,6 +352,10 @@ export function PreviewPanel() {
               ? 'Ready'
               : 'Preview';
 
+  const showInstantTailwindSetupNote = Boolean(
+    !useCloudView && currentProject && scaffoldTailwindNoteByProject[currentProject.id]
+  );
+
   const pythonAutoRunKey =
     currentProject && !isAgentRunning
       ? `${currentProject.id}:m:${completedMilestoneCount}`
@@ -303,7 +365,7 @@ export function PreviewPanel() {
     <div className="relative h-full flex flex-col bg-kalpa-bg">
       <div className="h-11 px-2.5 border-b border-kalpa-border bg-kalpa-bg-2 flex items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-1.5 min-w-0">
-          <IconButton label="Reload preview" size="sm" onClick={reloadPreview}>
+          <IconButton label="Retry build / reload preview" size="sm" onClick={() => void handleRetryBuild()}>
             <RotateCw className="w-3.5 h-3.5" />
           </IconButton>
           {useCloudView && currentProject ? (
@@ -358,13 +420,30 @@ export function PreviewPanel() {
         </div>
       </div>
 
+      {/* B3: Instant vs Cloud Tailwind setup honesty note */}
+      {showInstantTailwindSetupNote && currentProject ? (
+        <div className="px-3 py-1.5 bg-kalpa-surface/90 border-b border-kalpa-border text-[11px] text-kalpa-muted flex items-center justify-between gap-2 shrink-0">
+          <span className="truncate">
+            Instant preview uses its own Tailwind runtime; the real build needed these setup files - they were added.
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss Tailwind setup note"
+            onClick={() => setScaffoldTailwindNote(currentProject.id, false)}
+            className="text-kalpa-muted hover:text-kalpa-text shrink-0 cursor-pointer"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      ) : null}
+
       {/* B2(b): 30s bundler timeout banner */}
       {!useCloudView && status === 'timeout' ? (
         <div className="px-3 py-1.5 bg-kalpa-warn/15 border-b border-kalpa-warn/35 text-[11px] text-kalpa-warn flex items-center justify-between gap-2 shrink-0">
           <span className="truncate">Preview timed out after 30s on this network.</span>
           <div className="flex items-center gap-2 shrink-0">
-            <button type="button" onClick={reloadPreview} className="underline font-semibold cursor-pointer">
-              Reload
+            <button type="button" onClick={() => void handleRetryBuild()} className="underline font-semibold cursor-pointer">
+              Retry build
             </button>
             <button type="button" onClick={() => void handleQuickSwitchToCloud()} className="underline font-semibold cursor-pointer">
               Cloud Sandbox
@@ -377,8 +456,8 @@ export function PreviewPanel() {
       {!useCloudView && staleAfterMaxRetries ? (
         <div className="px-3 py-1.5 bg-kalpa-warn/15 border-b border-kalpa-warn/35 text-[11px] text-kalpa-warn flex items-center justify-between gap-2 shrink-0">
           <span className="truncate">Preview may be out of date.</span>
-          <button type="button" onClick={reloadPreview} className="underline font-semibold shrink-0 cursor-pointer">
-            Rebuild
+          <button type="button" onClick={() => void handleRetryBuild()} className="underline font-semibold shrink-0 cursor-pointer">
+            Retry build
           </button>
         </div>
       ) : null}
@@ -390,7 +469,7 @@ export function PreviewPanel() {
             Tailwind styles did not load (network/CDN). Try Rebuild, or use the Cloud Sandbox.
           </span>
           <div className="flex items-center gap-2 shrink-0">
-            <button type="button" onClick={reloadPreview} className="underline font-semibold cursor-pointer">
+            <button type="button" onClick={() => void handleRetryBuild()} className="underline font-semibold cursor-pointer">
               Rebuild
             </button>
             <button type="button" onClick={() => void handleQuickSwitchToCloud()} className="underline font-semibold cursor-pointer">

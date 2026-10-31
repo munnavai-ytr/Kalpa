@@ -1,9 +1,11 @@
+import { applyDoctor, runScaffoldDoctor } from '@/lib/agent/scaffoldDoctor';
 import { buildTailwindHeadTags } from '@/lib/preview/tailwindInject';
 import { useProviderStore } from '@/lib/providers/store';
 import { CloudDevServerController } from '@/lib/sandbox/devServer';
 import { createE2bSandboxSession } from '@/lib/sandbox/e2b';
 import type { SandboxSession } from '@/lib/sandbox/provider';
 import {
+  BEACON_JS,
   classifyShellCommand,
   detectBlockedHost,
   splitShellLines,
@@ -15,6 +17,18 @@ import { vfs } from '@/lib/vfs/vfs';
 import type { DiagItem } from './diagnosticsRunner';
 
 export const INITIAL_PREVIEW_SANDBOX_DIAGNOSTIC_CHECKS: DiagItem[] = [
+  {
+    id: 'scaffold-doctor-selftest',
+    label: 'Scaffold Doctor Self-Test',
+    state: 'RUNNING',
+    detail: 'Testing broken FocusFlow project repair & idempotence…',
+  },
+  {
+    id: 'beacon-syntax',
+    label: 'Cloud Beacon & Style Probe Syntax Check',
+    state: 'RUNNING',
+    detail: 'Validating BEACON_JS syntax and __kalpaTailwindState probe…',
+  },
   {
     id: 'shell-classifier',
     label: 'Shell Classifier (10 Multi-Line & Server Samples)',
@@ -84,8 +98,8 @@ function waitForCloudBeaconProbe(url: string, timeoutMs = 10_000): Promise<{
         finish(
           ok,
           ok
-            ? `BEACON_JS verified (rootChildren=${d.rootChildren}, textLen=${d.textLen})`
-            : `BEACON_JS reported blank DOM (rootChildren=${d.rootChildren}, textLen=${d.textLen})`
+            ? `BEACON_JS verified (rootChildren=${d.rootChildren}, textLen=${d.textLen}, tw=${String(d.tw ?? 'unknown')})`
+            : `BEACON_JS reported blank DOM (rootChildren=${d.rootChildren}, textLen=${d.textLen}, tw=${String(d.tw ?? 'unknown')})`
         );
       }
     };
@@ -249,9 +263,137 @@ export function runShellClassifierDiagnostics(): DiagItem {
   }
 }
 
+export function runScaffoldDoctorSelfTest(): DiagItem {
+  const t0 = performance.now();
+  const brokenProject: Record<string, string> = {
+    'package.json': JSON.stringify(
+      {
+        name: 'focusflow-minimal',
+        private: true,
+        version: '0.0.0',
+        type: 'module',
+        scripts: { dev: 'vite', build: 'vite build', preview: 'vite preview' },
+        dependencies: {
+          react: '^18.3.1',
+          'react-dom': '^18.3.1',
+        },
+        devDependencies: {
+          tailwindcss: '^3.4.14',
+          typescript: '^5.6.3',
+          vite: '^5.4.10',
+        },
+      },
+      null,
+      2
+    ),
+    'tailwind.config.js':
+      "module.exports = {\n  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],\n  theme: { extend: {} },\n  plugins: [],\n};\n",
+    'index.html':
+      '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <link rel="icon" type="image/svg+xml" href="/vite.svg" />\n    <title>FocusFlow</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.tsx"></script>\n  </body>\n</html>\n',
+    'src/main.tsx':
+      "import React from 'react';\nimport ReactDOM from 'react-dom/client';\nimport './index.css';\n\nReactDOM.createRoot(document.getElementById('root')!).render(<div className=\"flex bg-slate-950 text-white\">FocusFlow</div>);\n",
+    'src/index.css': '@tailwind base;\n@tailwind components;\n@tailwind utilities;\n',
+  };
+
+  try {
+    const res1 = runScaffoldDoctor(brokenProject);
+    const fixed = applyDoctor(brokenProject, res1);
+    const res2 = runScaffoldDoctor(fixed);
+
+    const assertions: { label: string; ok: boolean }[] = [
+      {
+        label: 'added postcss.config.js',
+        ok: typeof fixed['postcss.config.js'] === 'string' && fixed['postcss.config.js'].includes('tailwindcss'),
+      },
+      {
+        label: 'converted tailwind.config.js to export default',
+        ok:
+          typeof fixed['tailwind.config.js'] === 'string' &&
+          /^\s*export\s+default\b/m.test(fixed['tailwind.config.js']) &&
+          !/\bmodule\.exports\b/.test(fixed['tailwind.config.js']),
+      },
+      {
+        label: 'added vite.config.ts',
+        ok: typeof fixed['vite.config.ts'] === 'string' && fixed['vite.config.ts'].includes('@vitejs/plugin-react'),
+      },
+      {
+        label: 'added tsconfig.json',
+        ok: typeof fixed['tsconfig.json'] === 'string' && fixed['tsconfig.json'].includes('"jsx"'),
+      },
+      {
+        label: 'added public/vite.svg',
+        ok: typeof fixed['public/vite.svg'] === 'string' && fixed['public/vite.svg'].includes('<svg'),
+      },
+      {
+        label: 'idempotent 2nd run (0 changes)',
+        ok: Object.keys(res2.changes).length === 0 && res2.issues.length === 0,
+      },
+    ];
+
+    const allOk = assertions.every((a) => a.ok);
+    const report = assertions.map((a) => `[${a.ok ? 'PASS' : 'FAIL'}] ${a.label}`).join(' · ');
+
+    return {
+      id: 'scaffold-doctor-selftest',
+      label: 'Scaffold Doctor Self-Test',
+      state: allOk ? 'PASS' : 'FAIL',
+      durationMs: Math.round(performance.now() - t0),
+      detail: report,
+    };
+  } catch (err) {
+    return {
+      id: 'scaffold-doctor-selftest',
+      label: 'Scaffold Doctor Self-Test',
+      state: 'FAIL',
+      durationMs: Math.round(performance.now() - t0),
+      detail: `[FAIL] ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+export function runBeaconSyntaxDiagnostics(): DiagItem {
+  const t0 = performance.now();
+  try {
+    // Parse BEACON_JS via Function constructor without executing side-effects on parent window
+    const compiled = new Function(BEACON_JS);
+    const hasProbeTwField = /type:'probe'[^}]*\btw:/.test(BEACON_JS);
+    const hasTwHelper =
+      BEACON_JS.includes('window.__kalpaTailwindState=tw') &&
+      BEACON_JS.includes('/@tailwind\\s+(base|components|utilities)/');
+
+    const checks: { label: string; ok: boolean }[] = [
+      { label: 'valid JS syntax', ok: typeof compiled === 'function' },
+      { label: 'probe includes tw field', ok: hasProbeTwField },
+      { label: '__kalpaTailwindState IIFE', ok: hasTwHelper },
+    ];
+    const allOk = checks.every((c) => c.ok);
+    return {
+      id: 'beacon-syntax',
+      label: 'Cloud Beacon & Style Probe Syntax Check',
+      state: allOk ? 'PASS' : 'FAIL',
+      durationMs: Math.round(performance.now() - t0),
+      detail: checks.map((c) => `[${c.ok ? 'PASS' : 'FAIL'}] ${c.label}`).join(' · '),
+    };
+  } catch (err) {
+    return {
+      id: 'beacon-syntax',
+      label: 'Cloud Beacon & Style Probe Syntax Check',
+      state: 'FAIL',
+      durationMs: Math.round(performance.now() - t0),
+      detail: `[FAIL] SyntaxError: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
 export async function executePreviewSandboxDiagnostics(
   upsertCheck: (item: DiagItem) => void
 ): Promise<void> {
+  // A4: Scaffold Doctor self-test (broken FocusFlow setup + idempotence)
+  upsertCheck(runScaffoldDoctorSelfTest());
+
+  // B4: BEACON_JS syntax & Tailwind style probe check
+  upsertCheck(runBeaconSyntaxDiagnostics());
+
   // C2: Pure 10-sample shell classifier check
   upsertCheck(runShellClassifierDiagnostics());
 

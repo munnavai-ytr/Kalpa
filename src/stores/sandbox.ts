@@ -13,6 +13,7 @@ import {
 import { createE2bSandboxSession } from '@/lib/sandbox/e2b';
 import type { SandboxSession } from '@/lib/sandbox/provider';
 import { createDebouncedVfsSync, syncFullVfsToSandbox } from '@/lib/sandbox/sync';
+import { usePreviewStore } from '@/stores/preview';
 
 export type CloudConnectionState =
   | 'disconnected'
@@ -26,6 +27,8 @@ export interface CloudBeaconError {
   source?: string;
   line?: number;
 }
+
+export type CloudTailwindUnappliedReason = 'directives-unprocessed' | 'utilities-missing';
 
 interface SandboxStoreState {
   engine: EngineKind;
@@ -46,6 +49,7 @@ interface SandboxStoreState {
   hostBlockedMessage: string | null;
   cloudBeaconErrors: CloudBeaconError[];
   cloudBlankScreen: boolean;
+  cloudStylesUnapplied: CloudTailwindUnappliedReason | null;
 
   syncEngineFromProject: (projectId: string, engine: EngineKind) => void;
   switchEngine: (projectId: string, nextEngine: EngineKind) => Promise<boolean>;
@@ -64,6 +68,7 @@ interface SandboxStoreState {
   stopDevServer: () => Promise<void>;
   pushCloudBeaconError: (err: CloudBeaconError) => void;
   setCloudBlankScreen: (blank: boolean) => void;
+  setCloudStylesUnapplied: (reason: CloudTailwindUnappliedReason | null) => void;
   clearCloudRuntimeSignals: () => void;
 }
 
@@ -101,6 +106,7 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
   hostBlockedMessage: null,
   cloudBeaconErrors: [],
   cloudBlankScreen: false,
+  cloudStylesUnapplied: null,
 
   syncEngineFromProject: (projectId, engine) => {
     const prevPid = get().projectId;
@@ -175,10 +181,15 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
       hostBlockedMessage: null,
       cloudBeaconErrors: [],
       cloudBlankScreen: false,
+      cloudStylesUnapplied: null,
     });
 
     try {
       const session = await createE2bSandboxSession(e2bKey);
+      if (!projectId.startsWith('_diag_')) {
+        const { runProjectScaffoldDoctor } = await import('@/lib/agent/verify');
+        await runProjectScaffoldDoctor(projectId, { source: 'cloud-devserver' });
+      }
       const initialMap = await syncFullVfsToSandbox(projectId, session);
 
       devController = new CloudDevServerController(() => {
@@ -200,7 +211,7 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
         onPackageJsonChanged: () => {
           const curSession = get().session;
           if (curSession && devController) {
-            set({ cloudBeaconErrors: [], cloudBlankScreen: false });
+            set({ cloudBeaconErrors: [], cloudBlankScreen: false, cloudStylesUnapplied: null });
             void devController.startOrRestart(projectId, curSession, {
               forceInstall: true,
               onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
@@ -282,6 +293,7 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
       hostBlockedMessage: null,
       cloudBeaconErrors: [],
       cloudBlankScreen: false,
+      cloudStylesUnapplied: null,
     });
   },
 
@@ -302,11 +314,23 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
   runDevServer: async (projectId, forceInstall = false) => {
     const session = get().session;
     if (!session || !devController) return;
-    set({ cloudBeaconErrors: [], cloudBlankScreen: false });
-    await devController.startOrRestart(projectId, session, {
-      forceInstall,
+    set({ cloudBeaconErrors: [], cloudBlankScreen: false, cloudStylesUnapplied: null });
+    let docPkgChanged = false;
+    if (!projectId.startsWith('_diag_')) {
+      const { runProjectScaffoldDoctor } = await import('@/lib/agent/verify');
+      const docOut = await runProjectScaffoldDoctor(projectId, {
+        source: 'cloud-devserver',
+        session,
+      });
+      docPkgChanged = docOut.pkgChanged;
+    }
+    const res = await devController.startOrRestart(projectId, session, {
+      forceInstall: forceInstall || docPkgChanged,
       onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
     });
+    if (res.status === 'running') {
+      usePreviewStore.getState().reloadPreview();
+    }
   },
 
   startDevServerCommand: async (projectId, opts) => {
@@ -320,11 +344,25 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
         hostBlockedMessage: null,
       };
     }
-    set({ cloudBeaconErrors: [], cloudBlankScreen: false });
-    return devController.startOrRestart(projectId, session, {
+    set({ cloudBeaconErrors: [], cloudBlankScreen: false, cloudStylesUnapplied: null });
+    let docPkgChanged = false;
+    if (!projectId.startsWith('_diag_')) {
+      const { runProjectScaffoldDoctor } = await import('@/lib/agent/verify');
+      const docOut = await runProjectScaffoldDoctor(projectId, {
+        source: 'cloud-devserver',
+        session,
+      });
+      docPkgChanged = docOut.pkgChanged;
+    }
+    const res = await devController.startOrRestart(projectId, session, {
       ...opts,
+      forceInstall: Boolean(opts?.forceInstall || docPkgChanged),
       onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
     });
+    if (res.status === 'running') {
+      usePreviewStore.getState().reloadPreview();
+    }
+    return res;
   },
 
   ensureDevServerRunning: async (projectId) => {
@@ -337,8 +375,18 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
     ) {
       return null;
     }
-    set({ cloudBeaconErrors: [], cloudBlankScreen: false });
+    set({ cloudBeaconErrors: [], cloudBlankScreen: false, cloudStylesUnapplied: null });
+    let docPkgChanged = false;
+    if (!projectId.startsWith('_diag_')) {
+      const { runProjectScaffoldDoctor } = await import('@/lib/agent/verify');
+      const docOut = await runProjectScaffoldDoctor(projectId, {
+        source: 'cloud-devserver',
+        session: state.session,
+      });
+      docPkgChanged = docOut.pkgChanged;
+    }
     return devController.startOrRestart(projectId, state.session, {
+      forceInstall: docPkgChanged,
       onTerminalEcho: (l) => useTerminalStore.getState().writeLine(l, 'system'),
     });
   },
@@ -383,5 +431,8 @@ export const useSandboxStore = create<SandboxStoreState>((set, get) => ({
 
   setCloudBlankScreen: (cloudBlankScreen) => set({ cloudBlankScreen }),
 
-  clearCloudRuntimeSignals: () => set({ cloudBeaconErrors: [], cloudBlankScreen: false }),
+  setCloudStylesUnapplied: (cloudStylesUnapplied) => set({ cloudStylesUnapplied }),
+
+  clearCloudRuntimeSignals: () =>
+    set({ cloudBeaconErrors: [], cloudBlankScreen: false, cloudStylesUnapplied: null }),
 }));

@@ -10,7 +10,12 @@ import {
   Play,
   RotateCw,
   TerminalSquare,
+  Wrench,
 } from 'lucide-react';
+import {
+  buildTailwindUnappliedDiagnosticMessage,
+  runProjectScaffoldDoctor,
+} from '@/lib/agent/verify';
 import { useSandboxStore } from '@/stores/sandbox';
 import { usePreviewStore } from '@/stores/preview';
 import { useChatStore } from '@/stores/chat';
@@ -48,21 +53,25 @@ export function CloudPreviewStage({
   const hostBlockedMessage = useSandboxStore((s) => s.hostBlockedMessage);
   const cloudBeaconErrors = useSandboxStore((s) => s.cloudBeaconErrors);
   const cloudBlankScreen = useSandboxStore((s) => s.cloudBlankScreen);
+  const cloudStylesUnapplied = useSandboxStore((s) => s.cloudStylesUnapplied);
   const runDevServer = useSandboxStore((s) => s.runDevServer);
   const recreateCloud = useSandboxStore((s) => s.recreateCloud);
   const extendCloud = useSandboxStore((s) => s.extendCloud);
   const pushCloudBeaconError = useSandboxStore((s) => s.pushCloudBeaconError);
   const setCloudBlankScreen = useSandboxStore((s) => s.setCloudBlankScreen);
+  const setCloudStylesUnapplied = useSandboxStore((s) => s.setCloudStylesUnapplied);
 
   const pushPreviewEntry = usePreviewStore((s) => s.pushEntry);
+  const reloadPreview = usePreviewStore((s) => s.reloadPreview);
   const sendUserMessage = useChatStore((s) => s.sendUserMessage);
   const setComposerDraft = useChatStore((s) => s.setComposerDraft);
   const isAgentRunning = useAgentStore((s) => s.isRunning);
   const setActiveIdeTab = useUiStore((s) => s.setActiveIdeTab);
 
   const [showLogsOverlay, setShowLogsOverlay] = useState(false);
+  const [fixingStyles, setFixingStyles] = useState(false);
 
-  // A7: Listen for cloud-beacon messages from *.e2b.app iframe
+  // A7 + B2: Listen for cloud-beacon messages (including Tailwind style probe) from *.e2b.app iframe
   useEffect(() => {
     const onMessage = (ev: MessageEvent) => {
       if (typeof ev.origin !== 'string' || !ev.origin.endsWith('.e2b.app')) return;
@@ -80,11 +89,24 @@ export function CloudPreviewStage({
         const textLen = typeof data.textLen === 'number' ? data.textLen : 0;
         const isBlank = rootChildren === 0 || textLen < 5;
         setCloudBlankScreen(isBlank);
+
+        const tw = typeof data.tw === 'string' ? data.tw : 'unknown';
+        if (
+          rootChildren > 0 &&
+          (tw === 'directives-unprocessed' || tw === 'utilities-missing')
+        ) {
+          setCloudStylesUnapplied(tw);
+        } else {
+          setCloudStylesUnapplied(null);
+        }
+        window.dispatchEvent(
+          new CustomEvent('kalpa:cloud-probe', { detail: { rootChildren, textLen, tw } })
+        );
       }
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [pushCloudBeaconError, pushPreviewEntry, setCloudBlankScreen]);
+  }, [pushCloudBeaconError, pushPreviewEntry, setCloudBlankScreen, setCloudStylesUnapplied]);
 
   const sendFixRequest = (prompt: string) => {
     if (breakpoint === 'phone') setActiveIdeTab('chat');
@@ -144,7 +166,9 @@ export function CloudPreviewStage({
       : devServerStatus === 'starting'
         ? 'Starting'
         : devServerStatus === 'running'
-          ? 'Running'
+          ? cloudStylesUnapplied
+            ? 'Styles not applied'
+            : 'Running'
           : devServerStatus === 'crashed'
             ? 'Crashed'
             : 'Stopped';
@@ -153,9 +177,57 @@ export function CloudPreviewStage({
     devServerStatus === 'crashed' ||
     Boolean(hostBlockedMessage) ||
     cloudBlankScreen ||
+    Boolean(cloudStylesUnapplied) ||
     cloudBeaconErrors.length > 0;
 
+  const handleFixStylesAutomatically = async () => {
+    if (fixingStyles) return;
+    setFixingStyles(true);
+    try {
+      const docOut = await runProjectScaffoldDoctor(projectId, {
+        source: 'auto-fix-styles',
+        force: true,
+      });
+      await runDevServer(projectId, docOut.pkgChanged);
+      reloadPreview();
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          window.removeEventListener('kalpa:cloud-probe', finish);
+          resolve();
+        };
+        const t = setTimeout(finish, 4500);
+        window.addEventListener('kalpa:cloud-probe', finish, { once: true });
+      });
+    } finally {
+      setFixingStyles(false);
+    }
+  };
+
+  const handleAskAiFixStyles = async () => {
+    const reason = cloudStylesUnapplied ?? 'directives-unprocessed';
+    const diag = await buildTailwindUnappliedDiagnosticMessage(
+      projectId,
+      reason,
+      devServerPort,
+      devServerLogTail
+    );
+    sendFixRequest(`Please fix the unstyled Tailwind setup in this project.\n\n${diag}`);
+  };
+
   const handleAskAiToFix = () => {
+    if (
+      cloudStylesUnapplied &&
+      !cloudBlankScreen &&
+      cloudBeaconErrors.length === 0 &&
+      devServerStatus === 'running'
+    ) {
+      void handleAskAiFixStyles();
+      return;
+    }
     const beaconSection =
       cloudBeaconErrors.length > 0
         ? `\n\nBrowser runtime errors:\n${cloudBeaconErrors
@@ -183,6 +255,8 @@ export function CloudPreviewStage({
             <Spinner size={13} className="text-kalpa-violet shrink-0" />
           ) : devServerStatus === 'crashed' ? (
             <AlertTriangle className="w-3.5 h-3.5 text-kalpa-danger shrink-0" />
+          ) : devServerStatus === 'running' && cloudStylesUnapplied ? (
+            <AlertTriangle className="w-3.5 h-3.5 text-kalpa-warn shrink-0" />
           ) : (
             <span
               className={`w-2 h-2 rounded-full shrink-0 ${
@@ -190,7 +264,15 @@ export function CloudPreviewStage({
               }`}
             />
           )}
-          <span className="font-semibold text-kalpa-text">{statusBadgeLabel}</span>
+          <span
+            className={`font-semibold ${
+              devServerStatus === 'running' && cloudStylesUnapplied
+                ? 'text-kalpa-warn'
+                : 'text-kalpa-text'
+            }`}
+          >
+            {statusBadgeLabel}
+          </span>
           <span className="font-mono text-[11px] text-kalpa-muted">:{devServerPort}</span>
           <span className="font-mono text-[11px] text-kalpa-muted">
             · {formatLease(remainingMs)} left
@@ -207,7 +289,7 @@ export function CloudPreviewStage({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
-          {hasIssue ? (
+          {hasIssue && !(devServerStatus === 'running' && cloudStylesUnapplied && !cloudBlankScreen && cloudBeaconErrors.length === 0) ? (
             <Button
               size="sm"
               variant="primary"
@@ -231,7 +313,7 @@ export function CloudPreviewStage({
           <Button
             size="sm"
             variant="secondary"
-            disabled={isWorking}
+            disabled={isWorking || fixingStyles}
             leftIcon={<Play className="w-3 h-3" />}
             onClick={() => void runDevServer(projectId)}
           >
@@ -250,6 +332,40 @@ export function CloudPreviewStage({
           ) : null}
         </div>
       </div>
+
+      {/* B2: Styles not applied banner when Tailwind/PostCSS did not process styles */}
+      {devServerStatus === 'running' &&
+      cloudStylesUnapplied &&
+      !cloudBlankScreen &&
+      cloudBeaconErrors.length === 0 ? (
+        <div className="px-3 py-2 bg-kalpa-warn/15 border-b border-kalpa-warn/35 text-xs flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <p className="font-semibold text-kalpa-warn">Styles not applied</p>
+            <p className="text-[11px] text-kalpa-text">
+              The app runs but Tailwind styles are not applied (PostCSS/Tailwind is not running).
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={fixingStyles}
+              leftIcon={<Wrench className="w-3.5 h-3.5" />}
+              onClick={() => void handleFixStylesAutomatically()}
+            >
+              Fix setup automatically
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              leftIcon={<MessageSquarePlus className="w-3.5 h-3.5" />}
+              onClick={() => void handleAskAiFixStyles()}
+            >
+              Ask AI to fix
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* A7: Blank screen or runtime error banner while server is running */}
       {devServerStatus === 'running' && (cloudBlankScreen || cloudBeaconErrors.length > 0) ? (

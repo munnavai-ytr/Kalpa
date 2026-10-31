@@ -2,6 +2,7 @@
 
 import { create } from 'zustand';
 import type { Action } from '@/lib/agent/actions';
+import type { DoctorIssue } from '@/lib/agent/scaffoldDoctor';
 import type { AgentMode } from '@/lib/agent/prompts/system';
 import type { RecoveryNotice } from '@/lib/agent/recovery';
 import { restoreCheckpoint } from '@/lib/checkpoints/checkpoints';
@@ -36,7 +37,8 @@ export interface ActionOutcomeMeta {
 
 export type LiveStreamItem =
   | { id: string; kind: 'text'; text: string }
-  | { id: string; kind: 'action'; action: ExecutableAction; outcome?: ActionOutcomeMeta };
+  | { id: string; kind: 'action'; action: ExecutableAction; outcome?: ActionOutcomeMeta }
+  | { id: string; kind: 'scaffold-doctor'; fixedCount: number; issues: DoctorIssue[] };
 
 export interface PartialActionIndicator {
   tag: string;
@@ -305,6 +307,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       await db.put('chat', target);
     }
     await useBrainStore.getState().refreshBrainFromVfs(projectId);
+    usePreviewStore.getState().setScaffoldTailwindNote(projectId, false);
     usePreviewStore.getState().reloadPreview();
     return { ok: true, label: 'Reverted project files to before that turn.' };
   },

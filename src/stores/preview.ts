@@ -36,6 +36,7 @@ interface PreviewStoreState {
   rebuildAttemptsByHash: Record<string, number>;
   staleAfterMaxRetries: boolean;
   tailwindProbe: TailwindProbeState | null;
+  scaffoldTailwindNoteByProject: Record<string, boolean>;
 
   resetForProject: (projectId: string) => void;
   setStatus: (status: PreviewStatus) => void;
@@ -51,6 +52,7 @@ interface PreviewStoreState {
   markPreviewBlank: () => void;
   markPreviewTimeout: () => void;
   setTailwindProbe: (probe: TailwindProbeState | null) => void;
+  setScaffoldTailwindNote: (projectId: string, active: boolean) => void;
 }
 
 export const usePreviewStore = create<PreviewStoreState>((set, get) => ({
@@ -68,6 +70,7 @@ export const usePreviewStore = create<PreviewStoreState>((set, get) => ({
   rebuildAttemptsByHash: {},
   staleAfterMaxRetries: false,
   tailwindProbe: null,
+  scaffoldTailwindNoteByProject: {},
 
   resetForProject: (projectId) =>
     set((s) =>
@@ -195,4 +198,12 @@ export const usePreviewStore = create<PreviewStoreState>((set, get) => ({
     set((s) => (s.status === 'ready' ? s : { status: 'timeout', buildStartedAt: null })),
 
   setTailwindProbe: (tailwindProbe) => set({ tailwindProbe }),
+
+  setScaffoldTailwindNote: (projectId, active) =>
+    set((s) => ({
+      scaffoldTailwindNoteByProject: {
+        ...s.scaffoldTailwindNoteByProject,
+        [projectId]: active,
+      },
+    })),
 }));

@@ -2,6 +2,7 @@
 
 import { create } from 'zustand';
 import { detectProjectType } from '@/lib/agent/reliability';
+import { runProjectScaffoldDoctor } from '@/lib/agent/verify';
 import { ensureBrainFiles } from '@/lib/brain/files';
 import { rebuildBrainIndex } from '@/lib/brain/index';
 import { getKalpaDB, setSetting, type ProjectRecord, type StackKind } from '@/lib/vfs/db';
@@ -244,6 +245,9 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       await vfs.write(id, 'README.md', `# ${record.name}\n`);
     }
     await ensureBrainFiles(id);
+    if (entries.length > 0) {
+      await runProjectScaffoldDoctor(id, { source: 'zip-import', force: true });
+    }
     await rebuildBrainIndex(id);
     await get().loadProjects();
     return record;
@@ -275,6 +279,9 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       await vfs.write(id, 'README.md', `# ${record.name}\n`);
     }
     await ensureBrainFiles(id);
+    if (entries.length > 0) {
+      await runProjectScaffoldDoctor(id, { source: 'zip-import', force: true });
+    }
     await rebuildBrainIndex(id);
     await get().loadProjects();
     return record;

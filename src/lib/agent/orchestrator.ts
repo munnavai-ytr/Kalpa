@@ -31,7 +31,8 @@ import {
   shouldRejectNoOpTurn,
   stepFromAction,
 } from './turnHelpers';
-import { verifyWorkspaceAfterWrites } from './verify';
+import { runProjectScaffoldDoctor, verifyWorkspaceAfterWrites } from './verify';
+import type { DoctorIssue } from './scaffoldDoctor';
 import { acquireTurnWakeLock } from './wakeLock';
 
 const MAX_ITERATIONS_PER_TURN = 14;
@@ -127,6 +128,8 @@ export async function runTurn(projectId: string, userText: string, opts: RunTurn
   const liveItems: LiveStreamItem[] = [];
   const touchedPathsInTurn = new Set<string>();
   const errorSigCounts = new Map<string, number>();
+  const scaffoldFixesInTurn: { id: string; fixedCount: number; issues: DoctorIssue[] }[] = [];
+  let lastDoctorAppNotice: string | null = null;
 
   let totalUsageInput = 0, totalUsageOutput = 0, repairAttempts = 0;
   let noOpRetries = 0, emptyRetries = 0, interruptRetries = 0, outputTokenMultiplier = 1;
@@ -303,11 +306,13 @@ export async function runTurn(projectId: string, userText: string, opts: RunTurn
       scheduleLiveFlush();
       if (iterRawText.trim()) accumulatedTranscript.push(iterRawText);
 
+      const prevTouchedCount = touchedPathsInTurn.size;
       const execOut = await executeIterationActions(iterActions, {
         projectId, mode, signal: controller.signal, touchedPathsInTurn, openedFirstCodeFile, scheduleLiveFlush,
       });
       openedFirstCodeFile = execOut.openedFirstCodeFile;
-      if (execOut.modifiedCode) { modifiedCodeSinceVerify = true; hasRunVerifyShell = false; }
+      const iterTouchedNewFiles = touchedPathsInTurn.size > prevTouchedCount;
+      if (execOut.modifiedCode || iterTouchedNewFiles) { modifiedCodeSinceVerify = true; hasRunVerifyShell = false; }
       if (execOut.ranShell) { hasRunVerifyShell = true; ranAnyTool = true; }
       if (iterActions.some((x) => x.action.type === 'memory' && x.item.outcome?.ok)) memoryWriteCount++;
       if (iterActions.some((x) => ['read', 'search', 'list', 'impact', 'question'].includes(x.action.type))) {
@@ -330,6 +335,55 @@ export async function runTurn(projectId: string, userText: string, opts: RunTurn
         continue;
       }
 
+      // Scaffold Doctor (A2.1): run at most once per iteration that wrote or edited files, BEFORE verification
+      let doctorErrorSignature = '';
+      if (execOut.modifiedCode || iterTouchedNewFiles) {
+        const docOut = await runProjectScaffoldDoctor(projectId, {
+          source: 'agent-iteration',
+          force: true,
+          turnId,
+        });
+        if (docOut.changedPaths.length > 0 || ((docOut.hasErrors || docOut.hasWarnings) && docOut.relevantIssues.length > 0)) {
+          const cardId = uid('doc');
+          liveItems.push({
+            id: cardId,
+            kind: 'scaffold-doctor',
+            fixedCount: docOut.fixedCount,
+            issues: docOut.relevantIssues,
+          });
+          scaffoldFixesInTurn.push({
+            id: cardId,
+            fixedCount: docOut.fixedCount,
+            issues: docOut.relevantIssues,
+          });
+          scheduleLiveFlush();
+        }
+        if (docOut.changedPaths.length > 0) {
+          for (const p of docOut.changedPaths) touchedPathsInTurn.add(p);
+          modifiedCodeSinceVerify = true;
+          const sbNow = useSandboxStore.getState();
+          if (
+            sbNow.engine === 'cloud' &&
+            sbNow.status === 'connected' &&
+            sbNow.devServerStatus === 'running' &&
+            (docOut.pkgChanged || docOut.configChanged)
+          ) {
+            await sbNow.runDevServer(projectId, docOut.pkgChanged);
+          }
+        }
+        if (docOut.appNoticeXml) {
+          iterResults.push(docOut.appNoticeXml);
+          lastDoctorAppNotice = docOut.appNoticeXml;
+        }
+        if (docOut.hasErrors) {
+          doctorErrorSignature = docOut.relevantIssues
+            .filter((i) => i.status === 'error')
+            .map((i) => i.message)
+            .join('; ')
+            .slice(0, 220);
+        }
+      }
+
       const needsImmediateFollowup = iterActions.some(({ action, item }) =>
         action.type === 'read' || action.type === 'search' || action.type === 'list' ||
         action.type === 'impact' || action.type === 'question' ||
@@ -342,16 +396,18 @@ export async function runTurn(projectId: string, userText: string, opts: RunTurn
           engine: useSandboxStore.getState().engine, modifiedCodeFiles: modifiedCodeSinceVerify,
           hasRunVerificationShell: hasRunVerifyShell, signal: controller.signal,
         });
-        if (ver.hasError) {
+        const combinedHasError = ver.hasError || Boolean(doctorErrorSignature);
+        const combinedSig = ver.errorSignature || doctorErrorSignature;
+        if (combinedHasError) {
           repairAttempts++;
-          const sigCount = (errorSigCounts.get(ver.errorSignature) ?? 0) + 1;
-          errorSigCounts.set(ver.errorSignature, sigCount);
+          const sigCount = (errorSigCounts.get(combinedSig) ?? 0) + 1;
+          errorSigCounts.set(combinedSig, sigCount);
           if (repairAttempts <= prefs.maxRepairAttempts && sigCount < 3 && iter < MAX_ITERATIONS_PER_TURN) {
             sawFinished = false; completedMilestone = null; nextMilestone = null;
             useAgentStore.getState().updateTurnStatus({ step: 'S5', statusLabel: `Repairing issue (attempt ${repairAttempts})…` });
             iterResults.push(...ver.resultBlocks);
           } else {
-            accumulatedTranscript.push(`\n\n> **Verification notice:** Stopped automatic repair after ${repairAttempts} attempts:\n\`\`\`\n${ver.errorSignature}\n\`\`\``);
+            accumulatedTranscript.push(`\n\n> **Verification notice:** Stopped automatic repair after ${repairAttempts} attempts:\n\`\`\`\n${combinedSig}\n\`\`\``);
             modifiedCodeSinceVerify = false;
           }
         } else {
@@ -440,6 +496,7 @@ export async function runTurn(projectId: string, userText: string, opts: RunTurn
         stopped: controller.signal.aborted,
         model: activeProfile.model, providerLabel: activeProfile.label,
         notices: notices.length > 0 ? notices : undefined,
+        scaffoldFixes: scaffoldFixesInTurn.length > 0 ? scaffoldFixesInTurn : undefined,
         error: terminalTurnError,
         usage: totalUsageInput || totalUsageOutput ? { input: totalUsageInput || undefined, output: totalUsageOutput || undefined } : undefined,
       },
@@ -456,7 +513,10 @@ export async function runTurn(projectId: string, userText: string, opts: RunTurn
       !controller.signal.aborted &&
       currentAutoIdx + 1 < prefs.maxAutoMilestones
     ) {
-      await runTurn(projectId, buildContinueMessage(nextMilestone), {
+      const continueMsg = lastDoctorAppNotice
+        ? `${buildContinueMessage(nextMilestone)}\n\n${lastDoctorAppNotice}`
+        : buildContinueMessage(nextMilestone);
+      await runTurn(projectId, continueMsg, {
         mode: 'CONTINUE', hiddenUserMessage: true, autoMilestoneIndex: currentAutoIdx + 1, onMessagesChanged: opts.onMessagesChanged,
       });
       return;

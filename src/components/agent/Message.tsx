@@ -1,10 +1,19 @@
 'use client';
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { FileCode2 } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  FileCode2,
+  Wrench,
+  XCircle,
+} from 'lucide-react';
 import { parseWithFallback } from '@/lib/agent/reliability';
+import type { DoctorIssue } from '@/lib/agent/scaffoldDoctor';
 import type { ChatRecord, TurnFileChange } from '@/lib/vfs/db';
 import { vfs } from '@/lib/vfs/vfs';
 import type {
@@ -26,6 +35,86 @@ import { QuestionCard } from './ActionCards/QuestionCard';
 import { MilestoneCard } from './ActionCards/MilestoneCard';
 import { ErrorCard } from './ActionCards/ErrorCard';
 import { TurnFooter } from './TurnFooter';
+
+function ScaffoldDoctorCard({
+  fixedCount,
+  issues,
+}: {
+  fixedCount: number;
+  issues: DoctorIssue[];
+}) {
+  const [open, setOpen] = useState(false);
+  const errorCount = issues.filter((i) => i.status === 'error').length;
+  const warnCount = issues.filter((i) => i.status === 'warn').length;
+  const title =
+    fixedCount > 0
+      ? `Scaffold fixed (${fixedCount})`
+      : `Scaffold check (${issues.length})`;
+
+  const borderClass =
+    errorCount > 0
+      ? 'border-kalpa-danger/40 bg-kalpa-danger/10'
+      : fixedCount > 0
+        ? 'border-kalpa-success/35 bg-kalpa-success/10'
+        : 'border-kalpa-warn/35 bg-kalpa-warn/10';
+
+  return (
+    <div className={`rounded-[10px] border ${borderClass} overflow-hidden text-xs`}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left cursor-pointer hover:bg-kalpa-surface/40 transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          {open ? (
+            <ChevronDown className="w-3.5 h-3.5 text-kalpa-muted shrink-0" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5 text-kalpa-muted shrink-0" />
+          )}
+          <Wrench
+            className={`w-3.5 h-3.5 shrink-0 ${
+              errorCount > 0
+                ? 'text-kalpa-danger'
+                : fixedCount > 0
+                  ? 'text-kalpa-success'
+                  : 'text-kalpa-warn'
+            }`}
+          />
+          <span className="font-semibold text-kalpa-text truncate">{title}</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0 font-mono text-[10px]">
+          {errorCount > 0 ? (
+            <span className="px-1.5 py-0.5 rounded bg-kalpa-danger/20 text-kalpa-danger">
+              {errorCount} error{errorCount === 1 ? '' : 's'}
+            </span>
+          ) : null}
+          {warnCount > 0 ? (
+            <span className="px-1.5 py-0.5 rounded bg-kalpa-warn/20 text-kalpa-warn">
+              {warnCount} warn
+            </span>
+          ) : null}
+        </div>
+      </button>
+
+      {open ? (
+        <div className="px-3 pb-2.5 pt-1 border-t border-kalpa-border/50 space-y-1.5 bg-kalpa-bg-2/70">
+          {issues.map((iss, idx) => (
+            <div key={`${iss.id}-${idx}`} className="flex items-start gap-2 leading-relaxed">
+              {iss.status === 'fixed' ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-kalpa-success shrink-0 mt-0.5" />
+              ) : iss.status === 'error' ? (
+                <XCircle className="w-3.5 h-3.5 text-kalpa-danger shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle className="w-3.5 h-3.5 text-kalpa-warn shrink-0 mt-0.5" />
+              )}
+              <span className="text-kalpa-text break-words">{iss.message}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function renderSingleActionCard(
   action: ExecutableAction,
@@ -202,10 +291,27 @@ export function SavedMessage({
             if (!clean) return null;
             return <MarkdownProse key={item.id} text={clean} />;
           }
+          if (item.kind === 'scaffold-doctor') {
+            return (
+              <ScaffoldDoctorCard
+                key={item.id}
+                fixedCount={item.fixedCount}
+                issues={item.issues}
+              />
+            );
+          }
           const card = renderSingleActionCard(item.action, item.outcome, false, filesChangedCount);
           return card ? <div key={item.id}>{card}</div> : null;
         })
       )}
+
+      {msg.meta?.scaffoldFixes && msg.meta.scaffoldFixes.length > 0 ? (
+        <div className="space-y-1.5">
+          {msg.meta.scaffoldFixes.map((sf) => (
+            <ScaffoldDoctorCard key={sf.id} fixedCount={sf.fixedCount} issues={sf.issues} />
+          ))}
+        </div>
+      ) : null}
 
       {msg.meta?.error ? (
         <ErrorCard
@@ -254,6 +360,15 @@ export function LiveStreamingMessage({
           const clean = item.text.trim();
           if (!clean) return null;
           return <MarkdownProse key={item.id} text={clean} />;
+        }
+        if (item.kind === 'scaffold-doctor') {
+          return (
+            <ScaffoldDoctorCard
+              key={item.id}
+              fixedCount={item.fixedCount}
+              issues={item.issues}
+            />
+          );
         }
         const card = renderSingleActionCard(
           item.action,
